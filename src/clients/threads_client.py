@@ -127,6 +127,16 @@ class ThreadsClient:
         response.raise_for_status()
         return response.json()
 
+    @_retry_policy
+    def _post(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self._base_url}/{path.lstrip('/')}"
+        merged = {**params, "access_token": self._access_token}
+        # Log keys only — post text is fine, but the token must never be logged.
+        logger.info("POST %s params=%s", url, sorted(params.keys()))
+        response = self._client.post(url, params=merged)
+        response.raise_for_status()
+        return response.json()
+
     def get_account_insights(self) -> AccountInsights:
         """Fetch followers_count and views in a single call."""
         raw = self._get(
@@ -183,3 +193,39 @@ class ThreadsClient:
             if name in result:
                 result[name] = _extract_metric_value(entry)
         return result
+
+    # --- Phase 2: publishing (requires a threads_content_publish token) ---
+
+    def create_post(self, text: str) -> str:
+        """Create a TEXT media container and return its creation id.
+
+        POST /me/threads?media_type=TEXT&text=...  ->  {"id": "<creation_id>"}
+        """
+        if not text:
+            raise ValueError("text is required to create a post")
+        raw = self._post(
+            f"{self._user_id}/threads",
+            {"media_type": "TEXT", "text": text},
+        )
+        creation_id = raw.get("id")
+        if not creation_id:
+            logger.error("create_post: no id in response: %s", raw)
+            raise RuntimeError("Threads create_post returned no creation id")
+        return str(creation_id)
+
+    def publish_post(self, creation_id: str) -> str:
+        """Publish a previously created container and return the media id.
+
+        POST /me/threads_publish?creation_id=...  ->  {"id": "<media_id>"}
+        """
+        if not creation_id:
+            raise ValueError("creation_id is required to publish")
+        raw = self._post(
+            f"{self._user_id}/threads_publish",
+            {"creation_id": creation_id},
+        )
+        media_id = raw.get("id")
+        if not media_id:
+            logger.error("publish_post: no id in response: %s", raw)
+            raise RuntimeError("Threads publish_post returned no media id")
+        return str(media_id)

@@ -1,0 +1,292 @@
+"""F4: weekly generation of post drafts into the post_queue sheet.
+
+Uses unused notes (小言) as priority material plus recent posts as a content
+hint, and asks Claude (claude-sonnet-4-6) to write DRAFT_COUNT drafts across
+the 5 content pillars. Growth metrics (followers/views) are deliberately NOT
+fed in — those stay in the private morning report (F2). Drafts are written to
+post_queue with status=draft and a default schedule (tomorrow .. +7 days at
+12:00 JST). A human edits/approves later.
+
+Run from the repo root:
+    python -m src.jobs.generate_drafts
+"""
+from __future__ import annotations
+
+import json
+import logging
+import random
+from datetime import datetime, time, timedelta
+from pathlib import Path
+from typing import Any, Protocol
+
+from config.settings import (
+    DRAFT_COUNT,
+    DRAFT_TOP_POSTS,
+    JST,
+    POST_WINDOW_END_HOUR,
+    POST_WINDOW_START_HOUR,
+    load_settings,
+)
+from src.core.notes import NewNote, mark_note_used, read_new_notes
+from src.core.queue import (
+    POST_QUEUE_HEADER,
+    POST_QUEUE_SHEET,
+    STATUS_DRAFT,
+    rows_to_dicts,
+)
+from src.core.upsert import POSTS_SHEET
+from src.utils.logging_setup import setup_logging
+
+logger = logging.getLogger("generate_drafts")
+
+JOB_NAME = "generate_drafts"
+LOGS_SHEET = "logs"
+MAX_DRAFT_CHARS = 500
+PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "post_drafts.md"
+
+
+class SheetsLike(Protocol):
+    def read_rows(self, sheet: str, a1: str) -> list[list[Any]]: ...
+
+    def append_row(self, sheet: str, row: list[Any]) -> None: ...
+
+    def update_row(self, sheet: str, a1: str, row: list[Any]) -> None: ...
+
+
+class ClaudeLike(Protocol):
+    def generate(self, system_prompt: str, user_content: str) -> str: ...
+
+
+def _top_posts(sheets: SheetsLike, limit: int) -> list[dict[str, Any]]:
+    rows = sheets.read_rows(POSTS_SHEET, "A1:ZZ")
+    posts = rows_to_dicts(rows)
+
+    def views_of(p: dict[str, Any]) -> int:
+        try:
+            return int(p.get("views") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    posts.sort(key=views_of, reverse=True)
+    return posts[:limit]
+
+
+def _build_user_content(
+    top_posts: list[dict[str, Any]],
+    count: int,
+    notes_to_use: list[NewNote],
+) -> str:
+    lines = [f"以下を参考に、投稿の下書きを{count}本作ってください。", ""]
+
+    # Growth metrics (followers/views) are deliberately NOT provided here — they
+    # belong to the private morning report (F2), not to public post drafts.
+    lines.append("## 方針（必ず守る）")
+    lines.append(
+        "- 公開投稿にはフォロワー数・views等の数値（成長指標）を出さない。"
+        "うに自身が下の小言に数値や節目を書いている場合のみ、それを尊重して使う。"
+    )
+    lines.append(
+        "- 数字や成長アピールを前面に出さず、挑戦の過程・気づき・本音を共有する姿勢で書く。"
+    )
+    lines.append("")
+
+    n = len(notes_to_use)
+    if n:
+        lines.append("## 最優先：今日の小言（これを土台に整える）")
+        lines.append(
+            "各小言の温度感・言い回しを活かして「うに文体」に整える程度にとどめる。"
+            "小言に書かれていない数字・出来事・エピソードは創作しない（盛らない）。"
+        )
+        for i, note in enumerate(notes_to_use, start=1):
+            theme = note.theme or "（テーマ指定なし）"
+            body = note.note.replace("\n", " ")
+            lines.append(f"{i}. [theme={theme}] {body}")
+        lines.append("")
+        lines.append(
+            f"→ 最初の{n}本は上の小言1〜{n}をそれぞれ土台に整える。"
+            f"残り{count - n}本は、5つの柱から事実を必要としない一般的な学び・考え・"
+            "お役立ちで補完（数値以外の具体的な事実は創作しない）。"
+        )
+    else:
+        lines.append("## 小言なし")
+        lines.append(
+            f"未使用の小言はありません。{count}本すべてを5つの柱から、"
+            "事実を必要としない一般的な学び・考え・お役立ちで作成する"
+            "（上の数値以外の具体的な事実は創作しない）。"
+        )
+    lines.append("")
+
+    lines.append("## 反応が良かった投稿（内容の傾向の参考。数値は出さない）")
+    if top_posts:
+        for p in top_posts:
+            text = str(p.get("text", "")).replace("\n", " ")[:80]
+            lines.append(f"- {text}")
+    else:
+        lines.append("（まだ投稿データがありません）")
+    lines.append("")
+
+    lines.append(
+        f"ちょうど{count}本。各本にtheme（5つの柱のいずれか）を付け、"
+        f"本文は日本語{MAX_DRAFT_CHARS}文字以内。"
+        "全部を同じ長さに揃えず、普段は短め中心、1本程度は熱量のある長文を混ぜる。"
+    )
+    return "\n".join(lines)
+
+
+def parse_drafts(raw: str, expected: int) -> list[tuple[str, str]]:
+    """Parse the model's JSON array into (theme, text) tuples, defensively."""
+    text = raw.strip()
+    if text.startswith("```"):
+        # strip an optional ```json ... ``` fence
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to parse drafts JSON: %s | raw=%r", exc, raw[:500])
+        raise RuntimeError("Claude did not return valid JSON drafts") from exc
+
+    if not isinstance(data, list):
+        raise RuntimeError("Drafts JSON is not a list")
+
+    drafts: list[tuple[str, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("text", "")).strip()
+        if not body:
+            continue
+        theme = str(item.get("theme", "")).strip() or "未分類"
+        drafts.append((theme, body[:MAX_DRAFT_CHARS]))
+
+    if not drafts:
+        raise RuntimeError("No usable drafts found in Claude response")
+    if len(drafts) != expected:
+        logger.warning("Expected %d drafts, parsed %d", expected, len(drafts))
+    return drafts
+
+
+def build_queue_rows(
+    drafts: list[tuple[str, str]],
+    now: datetime,
+    count: int,
+) -> list[list[Any]]:
+    """Build post_queue rows (header order) with a natural-looking schedule.
+
+    One draft per day, tomorrow .. +count days. Each day's publish time is
+    randomized within the allowed window [POST_WINDOW_START_HOUR,
+    POST_WINDOW_END_HOUR) (JST) with a random minute, so the schedule never
+    lands on the same hour:minute every day. The human can still edit any row.
+    queue_id is unique per generation run via a timestamp prefix + sequence.
+    """
+    stamp = now.astimezone(JST).strftime("%Y%m%d%H%M")
+    base_date = now.astimezone(JST).date()
+    # Last hour that still leaves room before the window closes.
+    last_hour = max(POST_WINDOW_START_HOUR, POST_WINDOW_END_HOUR - 1)
+    rows: list[list[Any]] = []
+    for i, (theme, body) in enumerate(drafts[:count]):
+        hour = random.randint(POST_WINDOW_START_HOUR, last_hour)
+        minute = random.randint(0, 59)
+        scheduled = datetime.combine(
+            base_date + timedelta(days=i + 1),
+            time(hour=hour, minute=minute),
+            tzinfo=JST,
+        )
+        scheduled_at = scheduled.strftime("%Y-%m-%dT%H:%M:%S%z")
+        queue_id = f"q{stamp}-{i + 1:02d}"
+        row_dict = {
+            "queue_id": queue_id,
+            "scheduled_at": scheduled_at,
+            "text": body,
+            "theme": theme,
+            "status": STATUS_DRAFT,
+            "posted_post_id": "",
+            "posted_at": "",
+        }
+        rows.append([row_dict[col] for col in POST_QUEUE_HEADER])
+    return rows
+
+
+def generate(
+    sheets: SheetsLike,
+    claude: ClaudeLike,
+    system_prompt: str,
+    now: datetime,
+    count: int = DRAFT_COUNT,
+    top_posts_limit: int = DRAFT_TOP_POSTS,
+) -> list[list[Any]]:
+    """Core (testable) flow: read notes -> build context -> generate -> write."""
+    new_notes = read_new_notes(sheets)
+    notes_to_use = new_notes[:count]  # unused notes get top priority
+    top_posts = _top_posts(sheets, top_posts_limit)
+    # Growth metrics are intentionally not read here — see _build_user_content.
+    user_content = _build_user_content(top_posts, count, notes_to_use)
+
+    raw = claude.generate(system_prompt, user_content)
+    drafts = parse_drafts(raw, count)
+    rows = build_queue_rows(drafts, now, count)
+
+    for row in rows:
+        sheets.append_row(POST_QUEUE_SHEET, row)
+    logger.info("Wrote %d draft(s) to %s", len(rows), POST_QUEUE_SHEET)
+
+    # Mark the notes we used (the prioritized slice) as used.
+    for note in notes_to_use:
+        try:
+            mark_note_used(sheets, note)
+        except Exception as exc:
+            logger.error("Failed to mark note row %d used: %s", note.row_index, exc)
+    if notes_to_use:
+        logger.info("Marked %d note(s) as used", len(notes_to_use))
+    return rows
+
+
+def _record_log(sheets: SheetsLike, status: str, count: int, message: str) -> None:
+    now_iso = datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S%z")
+    sheets.append_row(LOGS_SHEET, [now_iso, JOB_NAME, status, count, message])  # type: ignore[attr-defined]
+
+
+def run() -> int:
+    setup_logging()
+    # Imported lazily so the testable core (generate/parse) doesn't require the
+    # anthropic / google SDKs to be installed.
+    from src.clients.claude_client import ClaudeClient
+    from src.clients.sheets_client import SheetsClient
+
+    try:
+        settings = load_settings()
+    except Exception as exc:
+        logger.error("Failed to load settings: %s", exc)
+        return 1
+
+    try:
+        sheets = SheetsClient(settings.google_sa_json, settings.spreadsheet_id)
+    except Exception as exc:
+        logger.error("Sheets init failed: %s", exc)
+        return 1
+
+    try:
+        system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+        claude = ClaudeClient(settings.anthropic_api_key, settings.claude_model)
+        rows = generate(sheets, claude, system_prompt, datetime.now(JST))
+    except Exception as exc:
+        logger.error("Draft generation failed: %s", exc)
+        try:
+            _record_log(sheets, status="failed", count=0, message=str(exc))
+        except Exception as log_exc:
+            logger.error("logs write failed: %s", log_exc)
+        return 1
+
+    try:
+        _record_log(sheets, status="ok", count=len(rows), message="drafts generated")
+    except Exception as exc:
+        logger.error("logs write failed: %s", exc)
+
+    logger.info("generate_drafts finished: %d drafts", len(rows))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

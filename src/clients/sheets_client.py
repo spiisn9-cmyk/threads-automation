@@ -66,7 +66,7 @@ class SheetsClient:
             raise RuntimeError(f"Failed to read rows from '{sheet}'") from exc
         return resp.get("values", [])
 
-    def _update_row(self, sheet: str, a1: str, row: list[Any]) -> None:
+    def update_row(self, sheet: str, a1: str, row: list[Any]) -> None:
         try:
             self._values.update(
                 spreadsheetId=self._spreadsheet_id,
@@ -103,7 +103,7 @@ class SheetsClient:
 
         for offset, row in enumerate(existing[1:], start=2):  # A2 is the first data row
             if len(row) > key_idx and row[key_idx] == key_val:
-                self._update_row(sheet, f"A{offset}", ordered_row)
+                self.update_row(sheet, f"A{offset}", ordered_row)
                 logger.info("upsert (update) %s=%s in %s row %d", key_col, key_val, sheet, offset)
                 return
 

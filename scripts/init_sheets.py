@@ -22,6 +22,8 @@ except ImportError:
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+from src.core.notes import NOTES_HEADER, NOTES_SHEET
+from src.core.queue import POST_QUEUE_HEADER, POST_QUEUE_SHEET
 from src.utils.logging_setup import setup_logging
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -30,6 +32,10 @@ SHEETS: dict[str, list[str]] = {
     "metrics_daily": ["date", "followers", "views", "follower_delta", "note"],
     "posts": ["post_id", "posted_at", "text", "views", "likes"],
     "logs": ["datetime", "job", "status", "count", "message"],
+    # Phase 2: scheduled post queue (created only if missing; existing sheets untouched).
+    POST_QUEUE_SHEET: POST_QUEUE_HEADER,
+    # 小言メモ→投稿素材 (created only if missing).
+    NOTES_SHEET: NOTES_HEADER,
 }
 
 
@@ -72,16 +78,31 @@ def main() -> int:
             .execute()
             .get("values", [])
         )
-        if current and current[0]:
+        existing_header = current[0] if current else []
+
+        if not existing_header:
+            spreadsheets.values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"{title}!A1",
+                valueInputOption="RAW",
+                body={"values": [header]},
+            ).execute()
+            log.info("Wrote header for %s", title)
+            continue
+
+        # Append any missing columns at the END (positional data stays intact).
+        missing = [c for c in header if c not in existing_header]
+        if not missing:
             log.info("Header already present for %s, skipping", title)
             continue
+        new_header = list(existing_header) + missing
         spreadsheets.values().update(
             spreadsheetId=spreadsheet_id,
             range=f"{title}!A1",
             valueInputOption="RAW",
-            body={"values": [header]},
+            body={"values": [new_header]},
         ).execute()
-        log.info("Wrote header for %s", title)
+        log.info("Added columns %s to %s", missing, title)
 
     return 0
 

@@ -109,6 +109,41 @@ def test_media_insights_parses_views_and_likes():
     assert stats["likes"] == 7
 
 
+def test_create_post_returns_creation_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/me/threads")
+        assert request.url.params["media_type"] == "TEXT"
+        assert request.url.params["text"] == "hello"
+        return httpx.Response(200, json={"id": "creation-123"})
+
+    tc = ThreadsClient("token", "me", client=_client_with(handler))
+    assert tc.create_post("hello") == "creation-123"
+
+
+def test_publish_post_returns_media_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/me/threads_publish")
+        assert request.url.params["creation_id"] == "creation-123"
+        return httpx.Response(200, json={"id": "media-999"})
+
+    tc = ThreadsClient("token", "me", client=_client_with(handler))
+    assert tc.publish_post("creation-123") == "media-999"
+
+
+def test_create_post_missing_id_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    tc = ThreadsClient("token", "me", client=_client_with(handler))
+    try:
+        tc.create_post("hello")
+    except RuntimeError:
+        return
+    raise AssertionError("expected RuntimeError when response has no id")
+
+
 def test_retry_on_500_then_succeeds():
     calls = {"n": 0}
 
