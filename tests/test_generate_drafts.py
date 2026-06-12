@@ -1,11 +1,11 @@
-"""Tests for F4 generate_drafts: writes DRAFT_COUNT drafts to post_queue."""
+"""Tests for F4 generate_drafts: writes DAILY_DRAFT_COUNT candidate drafts to post_queue."""
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
 
 from config.settings import (
-    DRAFT_COUNT,
+    DAILY_DRAFT_COUNT,
     POST_WINDOW_END_HOUR,
     POST_WINDOW_START_HOUR,
 )
@@ -62,37 +62,32 @@ def _payload(n: int) -> str:
     )
 
 
-def test_generate_writes_default_count_drafts():
+def test_generate_writes_daily_count_candidates_for_tomorrow():
     sheets = FakeSheets()
-    claude = FakeClaude(_payload(DRAFT_COUNT))
+    claude = FakeClaude(_payload(DAILY_DRAFT_COUNT))
     rows = generate(sheets, claude, "SYS", NOW)
 
     data = sheets.queue_data_rows()
-    assert len(rows) == DRAFT_COUNT
-    assert len(data) == DRAFT_COUNT
+    assert len(rows) == DAILY_DRAFT_COUNT
+    assert len(data) == DAILY_DRAFT_COUNT
 
     status_idx = POST_QUEUE_HEADER.index("status")
     qid_idx = POST_QUEUE_HEADER.index("queue_id")
     sched_idx = POST_QUEUE_HEADER.index("scheduled_at")
 
-    # all drafts, unique ids, one per day (tomorrow..+N), within the JST window
+    # all drafts, unique ids, all candidates for TOMORROW within the JST window
     assert all(r[status_idx] == STATUS_DRAFT for r in data)
-    assert len({r[qid_idx] for r in data}) == DRAFT_COUNT
-
-    dates = []
-    for i, r in enumerate(data, start=1):
+    assert len({r[qid_idx] for r in data}) == DAILY_DRAFT_COUNT
+    for r in data:
         dt = parse_jst(r[sched_idx])
         assert dt is not None
-        expected_date = (NOW + timedelta(days=i)).strftime("%Y-%m-%d")
-        assert dt.strftime("%Y-%m-%d") == expected_date  # one per consecutive day
-        assert POST_WINDOW_START_HOUR <= dt.hour < POST_WINDOW_END_HOUR  # in window
-        dates.append(dt.strftime("%Y-%m-%d"))
-    assert dates[0] == "2026-06-11" and dates[-1] == "2026-06-17"
+        assert dt.strftime("%Y-%m-%d") == "2026-06-11"  # next day
+        assert POST_WINDOW_START_HOUR <= dt.hour < POST_WINDOW_END_HOUR
 
 
 def test_generate_passes_post_content_without_numbers():
     sheets = FakeSheets()
-    claude = FakeClaude(_payload(DRAFT_COUNT))
+    claude = FakeClaude(_payload(DAILY_DRAFT_COUNT))
     generate(sheets, claude, "SYS", NOW)
     _, user_content = claude.calls[0]
     # post *content* is still referenced as a style hint...
@@ -106,7 +101,7 @@ def test_metrics_numbers_not_in_prompt():
     # FakeSheets.metrics_daily has followers=27, views=1000 — none of which
     # should reach the public-post generation prompt.
     sheets = FakeSheets()
-    claude = FakeClaude(_payload(DRAFT_COUNT))
+    claude = FakeClaude(_payload(DAILY_DRAFT_COUNT))
     generate(sheets, claude, "SYS", NOW)
     _, user_content = claude.calls[0]
     assert "27" not in user_content

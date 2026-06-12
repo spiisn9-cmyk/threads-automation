@@ -22,20 +22,27 @@ except ImportError:
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+from src.core.learnings import LEARNINGS_HEADER, LEARNINGS_SHEET
 from src.core.notes import NOTES_HEADER, NOTES_SHEET
 from src.core.queue import POST_QUEUE_HEADER, POST_QUEUE_SHEET
+from src.core.references import REFERENCES_HEADER, REFERENCES_SHEET
 from src.utils.logging_setup import setup_logging
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 SHEETS: dict[str, list[str]] = {
     "metrics_daily": ["date", "followers", "views", "follower_delta", "note"],
-    "posts": ["post_id", "posted_at", "text", "views", "likes"],
+    # rating (good/ok/bad) and feedback are human-entered; appended at the end.
+    "posts": ["post_id", "posted_at", "text", "views", "likes", "rating", "feedback"],
     "logs": ["datetime", "job", "status", "count", "message"],
     # Phase 2: scheduled post queue (created only if missing; existing sheets untouched).
     POST_QUEUE_SHEET: POST_QUEUE_HEADER,
     # 小言メモ→投稿素材 (created only if missing).
     NOTES_SHEET: NOTES_HEADER,
+    # 参考資料（伸びている投稿の型を学ぶ swipe file）(created only if missing).
+    REFERENCES_SHEET: REFERENCES_HEADER,
+    # 日々の学び（分析の蓄積）(created only if missing).
+    LEARNINGS_SHEET: LEARNINGS_HEADER,
 }
 
 

@@ -13,12 +13,15 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from config.settings import load_settings
+from config.settings import ANALYSIS_LOOKBACK_DAYS, load_settings
 from src.clients.claude_client import ClaudeClient
 from src.clients.notify_client import NotifyClient, SmtpConfig
 from src.clients.sheets_client import SheetsClient
 from src.clients.threads_client import ThreadsClient
+from src.core.analysis import analyze
+from src.core.learnings import SOURCE_AUTO, append_learning
 from src.core.models import DailyMetric, PostMetric
+from src.core.queue import parse_jst, rows_to_dicts
 from src.core.upsert import METRICS_DAILY_SHEET, POSTS_SHEET, upsert_daily
 from src.utils.logging_setup import setup_logging
 
@@ -29,6 +32,9 @@ LOGS_SHEET = "logs"
 JOB_NAME = "run_daily"
 TOP_POSTS = 3
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system_report.md"
+ANALYSIS_PROMPT_PATH = (
+    Path(__file__).resolve().parents[2] / "prompts" / "analyze_posts.md"
+)
 
 
 def _today_jst() -> str:
@@ -98,7 +104,11 @@ def _build_user_content(
     return "\n".join(lines)
 
 
-def _record_post(sheets: SheetsClient, post: PostMetric) -> None:
+def _record_post(
+    sheets: SheetsClient, post: PostMetric, rating: str = "", feedback: str = ""
+) -> None:
+    # rating/feedback are human-entered; pass through existing values so the
+    # daily metrics refresh (upsert overwrites the whole row) doesn't wipe them.
     sheets.upsert_row(
         POSTS_SHEET,
         key_col="post_id",
@@ -109,8 +119,37 @@ def _record_post(sheets: SheetsClient, post: PostMetric) -> None:
             "text": post.text.replace("\n", " "),
             "views": post.views,
             "likes": post.likes,
+            "rating": rating,
+            "feedback": feedback,
         },
     )
+
+
+def _existing_post_meta(sheets: SheetsClient) -> dict[str, tuple[str, str]]:
+    """Map post_id -> (rating, feedback) from the current posts sheet."""
+    meta: dict[str, tuple[str, str]] = {}
+    for d in rows_to_dicts(sheets.read_rows(POSTS_SHEET, "A1:ZZ")):
+        pid = str(d.get("post_id", ""))
+        if pid:
+            meta[pid] = (str(d.get("rating", "")), str(d.get("feedback", "")))
+    return meta
+
+
+def _recent_posts_for_analysis(
+    sheets: SheetsClient, lookback_days: int, now: datetime
+) -> list[dict[str, object]]:
+    """Recent posts (within lookback) with ratings, newest first."""
+    cutoff = now - timedelta(days=lookback_days)
+    out: list[dict[str, object]] = []
+    for d in rows_to_dicts(sheets.read_rows(POSTS_SHEET, "A1:ZZ")):
+        if not str(d.get("post_id", "")):
+            continue
+        dt = parse_jst(d.get("posted_at"))
+        if dt is not None and dt < cutoff:
+            continue  # too old; keep undated rows so manual ratings aren't lost
+        out.append(d)
+    out.sort(key=lambda d: str(d.get("posted_at", "")), reverse=True)
+    return out
 
 
 def _record_log(sheets: SheetsClient, status: str, count: int, message: str) -> None:
@@ -128,6 +167,7 @@ def run() -> int:
         return 1
 
     today = _today_jst()
+    now_dt = datetime.now(JST)
 
     # --- Sheets (optional — report can still be emailed without it) ---
     sheets: SheetsClient | None = None
@@ -168,9 +208,16 @@ def run() -> int:
         except Exception as exc:
             logger.error("upsert_daily failed: %s", exc)
             failures.append(f"metrics_daily書き込み: {exc}")
+        # Preserve any human-entered rating/feedback across the metrics refresh.
+        try:
+            existing_meta = _existing_post_meta(sheets)
+        except Exception as exc:
+            logger.error("reading existing post meta failed: %s", exc)
+            existing_meta = {}
         for p in posts:
+            rating, feedback = existing_meta.get(p.post_id, ("", ""))
             try:
-                _record_post(sheets, p)
+                _record_post(sheets, p, rating=rating, feedback=feedback)
             except Exception as exc:
                 logger.error("posts write failed for %s: %s", p.post_id, exc)
                 failures.append(f"posts書き込み({p.post_id}): {exc}")
@@ -191,15 +238,48 @@ def run() -> int:
 
     user_content = _build_user_content(today, report_metric, recent_csv, top_posts)
 
-    # --- Claude: 所感 + 今日の一手 ---
+    # --- Claude client (shared by analysis + report) ---
+    claude: ClaudeClient | None = None
     try:
-        system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
         claude = ClaudeClient(settings.anthropic_api_key, settings.claude_model)
-        report_body = claude.generate(system_prompt, user_content)
     except Exception as exc:
-        logger.error("Claude generation failed: %s", exc)
-        failures.append(f"Claude生成: {exc}")
-        report_body = "（所感の生成に失敗しました。取得した数値のみお届けします。）\n\n" + user_content
+        logger.error("Claude init failed: %s", exc)
+        failures.append(f"Claude初期化: {exc}")
+
+    # --- Daily analysis: recent posts -> learnings + report block ---
+    analysis_block = ""
+    if sheets is not None and claude is not None:
+        try:
+            analysis_prompt = ANALYSIS_PROMPT_PATH.read_text(encoding="utf-8")
+            recent_posts = _recent_posts_for_analysis(
+                sheets, ANALYSIS_LOOKBACK_DAYS, now_dt
+            )
+            result = analyze(claude, analysis_prompt, recent_posts)
+            analysis_block = result.report_block
+            for learning, evidence in result.learnings:
+                append_learning(sheets, learning, evidence, now_dt, source=SOURCE_AUTO)
+            logger.info("Analysis stored %d learning(s)", len(result.learnings))
+        except Exception as exc:
+            logger.error("Analysis failed: %s", exc)
+            failures.append(f"投稿分析: {exc}")
+
+    # --- Claude: 所感 + 今日の一手 ---
+    if claude is not None:
+        try:
+            system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+            report_body = claude.generate(system_prompt, user_content)
+        except Exception as exc:
+            logger.error("Claude generation failed: %s", exc)
+            failures.append(f"Claude生成: {exc}")
+            report_body = (
+                "（所感の生成に失敗しました。取得した数値のみお届けします。）\n\n"
+                + user_content
+            )
+    else:
+        report_body = (
+            "（Claude未初期化のため所感を生成できません。数値のみお届けします。）\n\n"
+            + user_content
+        )
 
     # --- Email ---
     subject = f"[Threads日報] {today}"
@@ -208,6 +288,8 @@ def run() -> int:
         subject = "⚠️ " + subject
         prefix = "⚠️取得失敗あり\n" + "\n".join(f"- {f}" for f in failures) + "\n\n"
     body = prefix + report_body
+    if analysis_block:
+        body += "\n\n## 前日投稿の簡易分析\n" + analysis_block
 
     mail_ok = False
     try:

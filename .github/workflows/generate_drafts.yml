@@ -2,8 +2,8 @@ name: generate-drafts
 
 on:
   schedule:
-    # 00:00 UTC Sunday = 09:00 JST Sunday (weekly draft generation)
-    - cron: "0 0 * * 0"
+    # 22:00 UTC = 07:00 JST daily — after the morning report/analysis (06:30 JST).
+    - cron: "0 22 * * *"
   workflow_dispatch: {}
 
 jobs:

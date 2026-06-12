@@ -112,13 +112,17 @@ pytest
 | シート | カラム |
 |--------|--------|
 | `metrics_daily` | date, followers, views, follower_delta, note |
-| `posts` | post_id, posted_at, text, views, likes |
+| `posts` | post_id, posted_at, text, views, likes, rating, feedback |
 | `logs` | datetime, job, status, count, message |
+| `learnings` | created_at, learning, evidence, source |
 | `post_queue` | queue_id, scheduled_at, text, theme, status, posted_post_id, posted_at |
 | `notes` | created_at, note, theme, status |
+| `references` | created_at, source, impressions, text, learn, active |
 
 `post_queue.status` は `draft` → `approved` → `posted` / `failed` の4状態です。
 `notes.status` は `new`（未使用）→ `used`（下書きに反映済み）の2状態です。
+`references.active` は `active`（学習対象）/ `off`（無視）の2値です。
+`posts.rating` は `good`/`ok`/`bad`（うに手入力）、`feedback` は一言メモ。`learnings.source` は `auto`（分析が追記）/ `uni`（うにが追記）。
 
 ## Phase 2: 投稿の下書き生成＋承認制の予約自動投稿
 
@@ -126,7 +130,7 @@ MVP（数値取得・毎朝レポート）はそのままに、投稿の**下書
 人間の承認（`status` を `approved` に変更）が無い限り、何も投稿されません。
 
 ```
-generate_drafts (週次)  →  post_queue に status=draft で7本書き込み
+generate_drafts (日次)  →  post_queue に status=draft で翌日分の候補3本を書き込み
         │
         ▼
    あなたがスプレッドシートで内容を編集し、投稿したい行の status を approved に変更
@@ -158,25 +162,36 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
    次の下書き生成で、`status=new` の小言が**最優先**で投稿素材になります。
    小言に書いていない数字・出来事は創作されません（温度感・言い回しを活かして「うに文体」に整える程度）。
 
-3. **下書きを生成（F4）**
+3. **（任意）伸びてる投稿を `references` に貼る（型を学ぶ swipe file）**
+   参考にしたい「伸びている投稿」を `references` シートに1行ずつ貼ります。
+   - `source`: 投稿者ハンドルや URL
+   - `impressions`: おおよそのインプ数（手入力・任意）
+   - `text`: 投稿本文（参考にする“型”）
+   - `learn`: 学ぶ点メモ（例:「問いかけで始める型」）
+   - `active`: `active`（学習対象）/ `off`（無視）
+
+   生成時、`active` の行が「型のお手本」として渡され、**型・構成・書き出し・切り口・問いかけ方**を学びます。
+   **本文・トピック・具体表現は丸写ししません**（パクリ・重複を避ける）。中身はうに自身（小言／5つの柱）を、学んだ型で書きます。
+
+4. **下書きを生成（F4）**
    ```bash
    python -m src.jobs.generate_drafts
    ```
-   `prompts/post_drafts.md`（うにの文体ガイド）をシステムプロンプトに、`notes` の未使用小言＋直近の投稿内容（傾向の参考）を入力として、
-   Claude が5つの柱に沿って **7本** の下書きを生成し、`post_queue` に `status=draft` で書き込みます。
-   使った小言は `notes.status=used` に更新されます。小言が7本に満たない分は、5つの柱から
-   「事実を必要としない一般的な学び・考え・お役立ち」で補完します。
+   `prompts/post_drafts.md`（うにの文体ガイド）をシステムプロンプトに、`learnings`（効く型/避ける型）＋`posts.rating`（good/bad）＋`notes` の未使用小言＋`references` の型のお手本＋直近の投稿内容を入力として、
+   Claude が5つの柱に沿って **翌日分の候補を 3本**（`DAILY_DRAFT_COUNT`）生成し、`post_queue` に `status=draft` で書き込みます（公開投稿の安全ガードにより実際に出るのは1日1本まで＝残りは候補）。
+   使った小言は `notes.status=used` に更新されます。小言が足りない分は5つの柱から「事実を必要としない一般的な学び・考え・お役立ち」で補完します。`references`/`learnings` が無い場合は従来どおり（小言＋柱）で生成します。
+   詳細は後述の「日々の学習ループ」を参照。
 
    > **数値ポリシー**: 公開投稿にはフォロワー数・views等の成長指標を**出しません**（`metrics_daily` の数値は毎朝の自分向けレポート＝F2専用）。
    > うに自身が `notes` の小言に数値や節目を書いた場合のみ、それを尊重して使います。
-   `scheduled_at` は既定で「翌日から7日間・毎日12:00(JST)」が割り当てられます。
+   `scheduled_at` は既定で「翌日の日中」（投稿可能時間帯 8〜22時JST内・時/分をばらつかせる）を割り当てます。3本とも翌日の候補で、承認した1本だけが実際に投稿されます（後で編集可）。
    本数・投稿時刻・タイムゾーンは `config/settings.py` の定数（`DRAFT_COUNT` / `DRAFT_POST_HOUR` / `DRAFT_POST_MINUTE` / `JST`）で変更できます。
 
-4. **承認（人間の作業）**
+5. **承認（人間の作業）**
    スプレッドシートの `post_queue` を開き、本文や `scheduled_at` を必要に応じて編集。
    投稿したい行だけ `status` を `draft` → `approved` に変更します。**`draft` のままの行は絶対に投稿されません。**
 
-5. **予約投稿（F5）**
+6. **予約投稿（F5）**
    ```bash
    python -m src.jobs.publish_queue
    ```
@@ -214,12 +229,45 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 
 ### スケジュール実行（GitHub Actions）
 
-- `.github/workflows/generate_drafts.yml` … 週次（cron `0 0 * * 0` = 日曜 09:00 JST）＋手動実行
+- `.github/workflows/generate_drafts.yml` … 日次（cron `0 22 * * *` UTC = 07:00 JST、日報の後）＋手動実行
 - `.github/workflows/publish.yml` … 毎時（cron `5 * * * *`）＋手動実行
 - 既存の `daily.yml` は変更ありません。
 
 各workflowには既存と同じ Secrets を渡しています（`publish` 自体は Threads と Sheets のみ使いますが、
 `load_settings()` が全項目を検証するため全 Secrets を渡しておくと安全です）。
+
+## 日々の学習ループ（分析 → 学び → 改善した下書き）
+
+毎日「投稿の成績を分析 → 学びを蓄積 → 学びを反映した下書きを翌日分生成」を回します。
+
+```
+毎朝(F2 run_daily, 06:30 JST)
+  ├─ posts(直近7日)の成績＋rating/feedback を分析（Claude）
+  ├─ 学びを learnings に追記（source=auto, evidence付き）
+  └─ 日報メールに「前日投稿の簡易分析」ブロックを追加
+        │
+        ▼ あなたが posts に rating(good/ok/bad)・feedback を手入力
+        ▼
+毎朝(F4 generate_drafts, 07:00 JST)
+  └─ learnings＋rating＋references＋notes を材料に、
+     「bad/低反応の型を避け、good/伸びた型に寄せた」候補を翌日分 3本 生成（status=draft）
+```
+
+### 運用フロー：評価(rating)の付け方 → 翌日の生成に反映
+
+1. **投稿の評価を入れる**（任意・いつでも）
+   `posts` シートで、各投稿の `rating` に `good` / `ok` / `bad`、`feedback` に一言メモ（例:「問いかけで終えたら反応良かった」）を入力します。
+   - run_daily は毎朝 views/likes を更新しますが、**あなたが入れた rating/feedback は保持**されます（上書きされません）。
+2. **毎朝、自動で分析される**
+   run_daily が直近7日（`ANALYSIS_LOOKBACK_DAYS`）の投稿を分析し、`learnings` に学びを追記。日報メールにも簡易分析が載ります。
+   - ⚠️ 投稿数・数値が小さい初期は**断定せず「サンプルが少ない」前提**で控えめに書きます。
+3. **翌日分の下書きに反映される**
+   generate_drafts が `learnings`（効く型/避ける型）＋`posts.rating`（good に寄せ・bad を避ける）＋`references`（型）＋`notes`（内容）を材料に、改善した候補を **3本**（`DAILY_DRAFT_COUNT`）生成します。
+   - 維持される原則：**小言の事実は創作しない／参考・型は丸写ししない／数値(フォロワー・views)は投稿に出さない。**
+4. 自分でも気づきがあれば `learnings` に `source=uni` で直接追記してOK（生成材料になります）。
+
+設定の定数（`config/settings.py`）: `DAILY_DRAFT_COUNT=3` / `ANALYSIS_LOOKBACK_DAYS=7`。
+スケジュール: `generate_drafts.yml` は日次（`0 22 * * *` UTC = 07:00 JST、日報の後）。分析は `run_daily` 内包なので `daily.yml` は変更なし。
 
 ## ⚠️ 要確認（Meta API の不確実性）
 

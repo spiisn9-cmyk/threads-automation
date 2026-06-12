@@ -27,6 +27,10 @@ DRAFT_POST_MINUTE = 0
 # How many top-performing posts to feed the model as context.
 DRAFT_TOP_POSTS = 5
 
+# --- Daily learning loop ---
+DAILY_DRAFT_COUNT = 3  # candidate drafts generated per daily run
+ANALYSIS_LOOKBACK_DAYS = 7  # how many days of posts to analyze each morning
+
 # --- Publishing safety guards (anti-ban; human-like, conservative pace) ---
 # This tool posts via the official Threads API (threads_content_publish).
 MAX_POSTS_PER_RUN = 1  # at most 1 post per invocation (physically prevents bursts)
