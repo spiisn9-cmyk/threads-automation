@@ -1,21 +1,96 @@
-"""Google Sheets client.
+"""Google Sheets client (resilient to stale connections).
 
 Authenticates with a service-account JSON string (the literal contents of the
 key file, passed via GOOGLE_SA_JSON) and exposes append / read / upsert
 helpers scoped to the spreadsheets scope.
+
+google-api-python-client uses httplib2, which reuses a single HTTP connection.
+After a long idle (e.g. the publish job's jitter sleep) that connection can be
+silently closed by the server, so the next call fails with a transport error.
+Every API call therefore goes through `_execute_with_retry`, which retries
+transient errors and REBUILDS the service (fresh credentials + connection)
+between attempts. Errors are re-raised with the underlying cause attached.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
-from typing import Any
+import ssl
+import time
+from typing import Any, Callable
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# HTTP statuses worth retrying.
+_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+# Transport-level failures (stale/closed sockets, TLS resets, timeouts).
+# OSError covers ConnectionError, BrokenPipeError, TimeoutError, socket.error.
+_TRANSPORT_ERRORS = (OSError, ssl.SSLError, http.client.HTTPException)
+
+_MAX_ATTEMPTS = 4
+_BASE_DELAY = 1.0
+
+
+def _is_transient_sheets_error(exc: BaseException) -> bool:
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        try:
+            return int(status) in _RETRYABLE_STATUS
+        except (TypeError, ValueError):
+            return False
+    return isinstance(exc, _TRANSPORT_ERRORS)
+
+
+def _execute_with_retry(
+    make_request: Callable[[], Any],
+    rebuild_fn: Callable[[], None],
+    *,
+    op: str,
+    max_attempts: int = _MAX_ATTEMPTS,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    base_delay: float = _BASE_DELAY,
+) -> Any:
+    """Execute a Sheets request, retrying transient errors after rebuilding.
+
+    `make_request` must build the request from the CURRENT service each call, so
+    that a rebuild (new connection) takes effect on the next attempt.
+    Non-transient errors are raised immediately; transient ones retry up to
+    `max_attempts`, rebuilding the connection in between.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return make_request().execute()
+        except Exception as exc:
+            if not _is_transient_sheets_error(exc):
+                raise
+            last_exc = exc
+            if attempt == max_attempts:
+                logger.error(
+                    "Sheets %s failed after %d attempts: %r", op, attempt, exc
+                )
+                raise
+            logger.warning(
+                "Sheets %s transient error (attempt %d/%d): %r — rebuilding connection",
+                op,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            try:
+                rebuild_fn()
+            except Exception as rebuild_exc:
+                logger.warning("Sheets reconnect failed: %r", rebuild_exc)
+            sleep_fn(base_delay * attempt)
+    assert last_exc is not None  # unreachable; loop either returns or raises
+    raise last_exc
 
 
 class SheetsClient:
@@ -26,57 +101,79 @@ class SheetsClient:
             raise ValueError("spreadsheet_id is required")
 
         try:
-            info = json.loads(sa_json)
+            self._sa_info = json.loads(sa_json)
         except json.JSONDecodeError as exc:
             raise ValueError("GOOGLE_SA_JSON is not valid JSON") from exc
 
+        self._spreadsheet_id = spreadsheet_id
+        self._build()
+
+    def _build(self) -> None:
+        """(Re)build credentials + service — gives a fresh HTTP connection."""
         try:
             creds = service_account.Credentials.from_service_account_info(
-                info, scopes=SCOPES
+                self._sa_info, scopes=SCOPES
             )
-            service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+            self._service = build(
+                "sheets", "v4", credentials=creds, cache_discovery=False
+            )
         except Exception as exc:
             logger.error("Failed to authenticate to Google Sheets: %s", exc)
             raise RuntimeError("Could not authenticate to Google Sheets") from exc
 
-        self._spreadsheet_id = spreadsheet_id
-        self._values = service.spreadsheets().values()
+    def _values(self):
+        return self._service.spreadsheets().values()
 
     def append_row(self, sheet: str, row: list[Any]) -> None:
-        try:
-            self._values.append(
+        def make_request():
+            return self._values().append(
                 spreadsheetId=self._spreadsheet_id,
                 range=f"{sheet}!A1",
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row]},
-            ).execute()
+            )
+
+        try:
+            _execute_with_retry(make_request, self._build, op=f"append '{sheet}'")
         except Exception as exc:
-            logger.error("append_row failed for sheet %r: %s", sheet, exc)
-            raise RuntimeError(f"Failed to append row to '{sheet}'") from exc
+            logger.error("append_row failed for sheet %r: %r", sheet, exc)
+            raise RuntimeError(
+                f"Failed to append row to '{sheet}': {type(exc).__name__}: {exc}"
+            ) from exc
 
     def read_rows(self, sheet: str, a1: str) -> list[list[Any]]:
-        try:
-            resp = self._values.get(
+        def make_request():
+            return self._values().get(
                 spreadsheetId=self._spreadsheet_id,
                 range=f"{sheet}!{a1}",
-            ).execute()
+            )
+
+        try:
+            resp = _execute_with_retry(make_request, self._build, op=f"read '{sheet}'")
         except Exception as exc:
-            logger.error("read_rows failed for %r!%s: %s", sheet, a1, exc)
-            raise RuntimeError(f"Failed to read rows from '{sheet}'") from exc
+            logger.error("read_rows failed for %r!%s: %r", sheet, a1, exc)
+            raise RuntimeError(
+                f"Failed to read rows from '{sheet}': {type(exc).__name__}: {exc}"
+            ) from exc
         return resp.get("values", [])
 
     def update_row(self, sheet: str, a1: str, row: list[Any]) -> None:
-        try:
-            self._values.update(
+        def make_request():
+            return self._values().update(
                 spreadsheetId=self._spreadsheet_id,
                 range=f"{sheet}!{a1}",
                 valueInputOption="USER_ENTERED",
                 body={"values": [row]},
-            ).execute()
+            )
+
+        try:
+            _execute_with_retry(make_request, self._build, op=f"update '{sheet}'")
         except Exception as exc:
-            logger.error("update_row failed for %r!%s: %s", sheet, a1, exc)
-            raise RuntimeError(f"Failed to update row in '{sheet}'") from exc
+            logger.error("update_row failed for %r!%s: %r", sheet, a1, exc)
+            raise RuntimeError(
+                f"Failed to update row in '{sheet}': {type(exc).__name__}: {exc}"
+            ) from exc
 
     def upsert_row(
         self, sheet: str, key_col: str, key_val: str, row_dict: dict[str, Any]

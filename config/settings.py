@@ -38,7 +38,10 @@ MAX_POSTS_PER_DAY = 1  # at most 1 post per JST calendar day (start conservative
 MIN_HOURS_BETWEEN_POSTS = 4  # minimum gap since the last successful post
 POST_WINDOW_START_HOUR = 8  # earliest publish hour (JST), inclusive
 POST_WINDOW_END_HOUR = 22  # latest publish hour (JST), exclusive
-POST_JITTER_MINUTES = 15  # random 0..N min delay before posting to scatter timing
+POST_JITTER_MINUTES = 3  # random 0..N min delay before posting to scatter timing
+# Kept short on purpose: a long sleep can outlive the Sheets HTTP connection.
+# The SheetsClient also retries+reconnects, so timing scatter no longer risks
+# a stale-connection failure on the post-sleep status write.
 
 
 class SettingsError(RuntimeError):

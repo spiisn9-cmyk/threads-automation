@@ -199,35 +199,65 @@ def publish_due(
         logger.info("No due posts to publish")
         return base
 
+    def mark_failed(row: dict[str, Any], queue_id: str) -> None:
+        # Best-effort terminal mark; never raises (avoids masking the real error).
+        try:
+            _update_status(sheets, row, STATUS_FAILED)
+        except Exception as upd_exc:
+            logger.error("Could not mark queue_id=%s failed: %r", queue_id, upd_exc)
+
     posted = 0
     failed = 0
     for row in targets:
         queue_id = str(row.get("queue_id"))
         text = str(row.get("text", ""))
 
-        # Guard 5: human-like jitter right before posting.
+        # Guard 5: short human-like jitter right before posting.
         delay = max(0.0, float(jitter_fn()))
         if delay:
             logger.info("Jitter: sleeping %.0fs before publishing %s", delay, queue_id)
             sleep_fn(delay)
 
+        # Step 1: publish. If this fails, nothing went out — safe to mark failed.
         try:
             creation_id = threads.create_post(text)
             media_id = threads.publish_post(creation_id)
-            posted_at = now_jst.strftime("%Y-%m-%dT%H:%M:%S%z")
+        except Exception as exc:
+            logger.error("Publish failed for queue_id=%s: %r", queue_id, exc, exc_info=True)
+            mark_failed(row, queue_id)
+            if log_fn is not None:
+                log_fn("failed", 1, f"queue_id={queue_id}: 投稿失敗: {type(exc).__name__}: {exc}")
+            failed += 1
+            continue
+
+        # Step 2: record success. The Sheets client retries+reconnects, so a
+        # post-sleep stale connection no longer breaks this. If it STILL fails,
+        # the post WAS published — mark it terminal (failed) so it is never
+        # re-posted (double-post / ban risk), and log loudly with the media_id
+        # and underlying cause so it can be reconciled by hand.
+        posted_at = now_jst.strftime("%Y-%m-%dT%H:%M:%S%z")
+        try:
             _update_status(
                 sheets, row, STATUS_POSTED, posted_post_id=media_id, posted_at=posted_at
             )
             posted += 1
             logger.info("Published queue_id=%s -> media_id=%s", queue_id, media_id)
         except Exception as exc:
-            logger.error("Publish failed for queue_id=%s: %s", queue_id, exc)
-            try:
-                _update_status(sheets, row, STATUS_FAILED)
-            except Exception as upd_exc:
-                logger.error("Could not mark queue_id=%s failed: %s", queue_id, upd_exc)
+            logger.error(
+                "Published queue_id=%s (media_id=%s) but FAILED to record status: %r",
+                queue_id,
+                media_id,
+                exc,
+                exc_info=True,
+            )
+            mark_failed(row, queue_id)
             if log_fn is not None:
-                log_fn("failed", 1, f"queue_id={queue_id}: {exc}")
+                log_fn(
+                    "failed",
+                    1,
+                    f"queue_id={queue_id}: 投稿成功・記録失敗（二重投稿防止でfailed扱い） "
+                    f"media_id={media_id}: {type(exc).__name__}: {exc}",
+                )
             failed += 1
 
     return {"due": len(due), "posted": posted, "failed": failed}

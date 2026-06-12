@@ -225,3 +225,33 @@ def test_failed_post_marked_failed_and_logged():
     assert result == {"due": 1, "posted": 0, "failed": 1}
     assert sheets.queue_dicts()[0]["status"] == "failed"
     assert any(a[0] == "failed" for a in logs)
+    # the underlying exception type is now surfaced in the log message
+    assert any("RuntimeError" in a[2] and "boom" in a[2] for a in logs)
+
+
+def test_status_write_failure_after_publish_logs_underlying_cause():
+    """Reproduces the reported bug: the post is published, but the post-sleep
+    Sheets write fails. It must be counted failed (anti double-post) and the log
+    must carry the underlying cause + media_id — not a bare message."""
+
+    class FlakySheets(FakeSheets):
+        def upsert_row(self, *args, **kwargs):
+            # Mirrors the real wrapped error from SheetsClient.read_rows after a
+            # stale connection (now with the underlying cause attached).
+            raise RuntimeError(
+                "Failed to read rows from 'post_queue': "
+                "ConnectionResetError: [Errno 54] Connection reset by peer"
+            )
+
+    sheets = FlakySheets([_row("q1", STATUS_APPROVED, PAST)])
+    threads = FakeThreads()
+    logs: list[tuple] = []
+    result = run_publish(sheets, threads, NOON, log=lambda *a: logs.append(a))
+
+    assert result["failed"] == 1 and result["posted"] == 0
+    # the post WAS published before the status write blew up
+    assert threads.created == ["hello"] and threads.published == ["creation-1"]
+    msg = logs[-1][2]
+    assert "記録失敗" in msg  # distinguishes "published but unrecorded"
+    assert "media_id=media-1" in msg  # so it can be reconciled by hand
+    assert "ConnectionResetError" in msg  # underlying root cause, not just a bare message
