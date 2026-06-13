@@ -67,13 +67,23 @@ class FakeSheets:
 
 
 class FakeThreads:
-    def __init__(self) -> None:
+    def __init__(self, statuses: list[str] | None = None) -> None:
         self.created: list[str] = []
         self.published: list[str] = []
+        self.status_checks = 0
+        # status sequence returned by get_container_status; default: ready now.
+        self._statuses = statuses if statuses is not None else ["FINISHED"]
 
     def create_post(self, text: str) -> str:
         self.created.append(text)
         return f"creation-{len(self.created)}"
+
+    def get_container_status(self, creation_id: str) -> dict[str, str]:
+        self.status_checks += 1
+        idx = min(self.status_checks - 1, len(self._statuses) - 1)
+        status = self._statuses[idx]
+        err = "media failed" if status == "ERROR" else ""
+        return {"status": status, "error_message": err}
 
     def publish_post(self, creation_id: str) -> str:
         self.published.append(creation_id)
@@ -255,3 +265,43 @@ def test_status_write_failure_after_publish_logs_underlying_cause():
     assert "記録失敗" in msg  # distinguishes "published but unrecorded"
     assert "media_id=media-1" in msg  # so it can be reconciled by hand
     assert "ConnectionResetError" in msg  # underlying root cause, not just a bare message
+
+
+def test_waits_for_in_progress_then_publishes():
+    # container is processing twice, then FINISHED -> only then publish
+    threads = FakeThreads(statuses=["IN_PROGRESS", "IN_PROGRESS", "FINISHED"])
+    sheets = FakeSheets([_row("q1", STATUS_APPROVED, PAST)])
+    result = run_publish(sheets, threads, NOON)
+
+    assert result["posted"] == 1
+    assert threads.status_checks == 3  # polled until FINISHED
+    assert threads.published == ["creation-1"]  # published exactly once, after FINISHED
+    assert sheets.queue_dicts()[0]["status"] == STATUS_POSTED
+
+
+def test_container_error_fails_without_publishing():
+    threads = FakeThreads(statuses=["ERROR"])
+    sheets = FakeSheets([_row("q1", STATUS_APPROVED, PAST)])
+    logs: list[tuple] = []
+    result = run_publish(sheets, threads, NOON, log=lambda *a: logs.append(a))
+
+    assert result == {"due": 1, "posted": 0, "failed": 1}
+    assert threads.published == []  # never published a broken container
+    assert sheets.queue_dicts()[0]["status"] == "failed"
+    msg = logs[-1][2]
+    assert "ERROR" in msg and "media failed" in msg  # error_message surfaced
+
+
+def test_container_timeout_fails_without_publishing():
+    # never reaches FINISHED; cap the checks so the test doesn't loop long
+    threads = FakeThreads(statuses=["IN_PROGRESS"])
+    sheets = FakeSheets([_row("q1", STATUS_APPROVED, PAST)])
+    logs: list[tuple] = []
+    result = run_publish(
+        sheets, threads, NOON, log=lambda *a: logs.append(a), max_status_checks=3
+    )
+
+    assert result == {"due": 1, "posted": 0, "failed": 1}
+    assert threads.status_checks == 3  # gave up after the cap
+    assert threads.published == []
+    assert "not FINISHED" in logs[-1][2]  # timeout reason logged

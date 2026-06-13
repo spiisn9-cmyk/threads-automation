@@ -36,6 +36,8 @@ from config.settings import (
     POST_JITTER_MINUTES,
     POST_WINDOW_END_HOUR,
     POST_WINDOW_START_HOUR,
+    PUBLISH_STATUS_MAX_CHECKS,
+    PUBLISH_STATUS_POLL_SECONDS,
     load_settings,
 )
 from src.core.queue import (
@@ -69,7 +71,56 @@ class SheetsLike(Protocol):
 class ThreadsLike(Protocol):
     def create_post(self, text: str) -> str: ...
 
+    def get_container_status(self, creation_id: str) -> dict[str, str]: ...
+
     def publish_post(self, creation_id: str) -> str: ...
+
+
+# Container statuses that mean "stop waiting".
+_STATUS_FINISHED = "FINISHED"
+_STATUS_FAILURES = {"ERROR", "EXPIRED"}
+
+
+def wait_until_finished(
+    threads: ThreadsLike,
+    creation_id: str,
+    *,
+    sleep_fn,
+    poll_seconds: float,
+    max_checks: int,
+) -> None:
+    """Poll the container until status=FINISHED before publishing.
+
+    Raises RuntimeError on ERROR/EXPIRED or on timeout. Logs each check and the
+    final status so the wait is visible in the run logs.
+    """
+    last_status = ""
+    for attempt in range(1, max_checks + 1):
+        info = threads.get_container_status(creation_id)
+        status = str(info.get("status") or "").upper()
+        last_status = status or last_status
+        if status == _STATUS_FINISHED:
+            logger.info("Container %s FINISHED after %d check(s)", creation_id, attempt)
+            return
+        if status in _STATUS_FAILURES:
+            raise RuntimeError(
+                f"container {status}: {info.get('error_message') or ''} "
+                f"(creation_id={creation_id}, checks={attempt})"
+            )
+        logger.info(
+            "Container %s status=%s (check %d/%d); waiting %.0fs",
+            creation_id,
+            status or "?",
+            attempt,
+            max_checks,
+            poll_seconds,
+        )
+        if attempt < max_checks:
+            sleep_fn(poll_seconds)
+    raise RuntimeError(
+        f"container not FINISHED after {max_checks} checks "
+        f"(last status={last_status or '?'}, creation_id={creation_id})"
+    )
 
 
 def _is_due(row: dict[str, Any], now: datetime) -> bool:
@@ -150,6 +201,8 @@ def publish_due(
     min_hours: float = MIN_HOURS_BETWEEN_POSTS,
     window_start: int = POST_WINDOW_START_HOUR,
     window_end: int = POST_WINDOW_END_HOUR,
+    poll_seconds: float = PUBLISH_STATUS_POLL_SECONDS,
+    max_status_checks: int = PUBLISH_STATUS_MAX_CHECKS,
 ) -> dict[str, int]:
     """Apply safety guards and publish at most `max_per_run` due posts.
 
@@ -218,9 +271,17 @@ def publish_due(
             logger.info("Jitter: sleeping %.0fs before publishing %s", delay, queue_id)
             sleep_fn(delay)
 
-        # Step 1: publish. If this fails, nothing went out — safe to mark failed.
+        # Step 1: create container, WAIT until FINISHED, then publish. If any
+        # of these fails, nothing went out — safe to mark failed.
         try:
             creation_id = threads.create_post(text)
+            wait_until_finished(
+                threads,
+                creation_id,
+                sleep_fn=sleep_fn,
+                poll_seconds=poll_seconds,
+                max_checks=max_status_checks,
+            )
             media_id = threads.publish_post(creation_id)
         except Exception as exc:
             logger.error("Publish failed for queue_id=%s: %r", queue_id, exc, exc_info=True)

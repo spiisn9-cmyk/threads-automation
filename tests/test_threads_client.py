@@ -121,6 +121,18 @@ def test_create_post_returns_creation_id():
     assert tc.create_post("hello") == "creation-123"
 
 
+def test_get_container_status_parses_status_and_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/creation-123")
+        assert request.url.params["fields"] == "status,error_message"
+        return httpx.Response(200, json={"status": "FINISHED", "id": "creation-123"})
+
+    tc = ThreadsClient("token", "me", client=_client_with(handler))
+    info = tc.get_container_status("creation-123")
+    assert info["status"] == "FINISHED"
+    assert info["error_message"] == ""  # missing key -> "" (defensive)
+
+
 def test_publish_post_returns_media_id():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"

@@ -43,6 +43,11 @@ POST_JITTER_MINUTES = 3  # random 0..N min delay before posting to scatter timin
 # The SheetsClient also retries+reconnects, so timing scatter no longer risks
 # a stale-connection failure on the post-sleep status write.
 
+# Wait for the media container to become status=FINISHED before publishing
+# (Meta returns 400 "media not ready" if you publish a still-processing container).
+PUBLISH_STATUS_POLL_SECONDS = 3  # interval between status checks
+PUBLISH_STATUS_MAX_CHECKS = 20  # ~60s total before giving up
+
 
 class SettingsError(RuntimeError):
     """Raised when a required setting is missing or malformed."""

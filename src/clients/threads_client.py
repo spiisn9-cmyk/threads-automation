@@ -196,6 +196,22 @@ class ThreadsClient:
 
     # --- Phase 2: publishing (requires a threads_content_publish token) ---
 
+    def get_container_status(self, creation_id: str) -> dict[str, str]:
+        """Fetch a media container's processing status.
+
+        GET /{creation_id}?fields=status,error_message
+          -> {"status": "IN_PROGRESS|FINISHED|ERROR|EXPIRED|PUBLISHED", ...}
+        Returns {"status": <str|"">, "error_message": <str|"">} defensively.
+        """
+        if not creation_id:
+            raise ValueError("creation_id is required")
+        raw = self._get(creation_id, {"fields": "status,error_message"})
+        logger.info("RAW container status for %s: %s", creation_id, raw)
+        return {
+            "status": str(raw.get("status") or ""),
+            "error_message": str(raw.get("error_message") or ""),
+        }
+
     def create_post(self, text: str) -> str:
         """Create a TEXT media container and return its creation id.
 

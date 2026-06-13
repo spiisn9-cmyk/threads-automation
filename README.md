@@ -196,6 +196,9 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
    python -m src.jobs.publish_queue
    ```
    `status==approved` かつ `scheduled_at<=現在(JST)` の行を対象に、**安全ガードを通過した場合のみ最大1本**を投稿します。
+   投稿は2段階で、**コンテナ作成後に `status=FINISHED` になるまで待ってから公開**します
+   （Meta はコンテナ処理中に公開すると 400「media not ready」を返すため。既定で約3秒間隔・最大20回＝約60秒ポーリング）。
+   `status=ERROR`/`EXPIRED` やタイムアウトは即 `failed`（理由を `logs` に記録）。
    成功で `status=posted`＋`posted_post_id`＋`posted_at`(JST) を記録、失敗で `status=failed`＋`logs` に記録。
    `posted` / `failed` は再処理しないため、毎時実行しても二重投稿しません。
 
@@ -287,10 +290,12 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 
 ### Phase 2（投稿）の要確認
 
-- 投稿は2段階です。レスポンスはいずれも `{"id": "..."}` を想定し、防御的に `id` を取り出します。
+- 投稿は3段階です。レスポンスはいずれも `{"id": "..."}` 等を想定し、防御的に取り出します。
   - 作成: `POST /me/threads`（`media_type=TEXT`, `text=...`）→ `creation_id`
+  - **状態確認: `GET /{creation_id}?fields=status,error_message` を `status=FINISHED` までポーリング**（既定 約3秒×最大20回）
   - 公開: `POST /me/threads_publish`（`creation_id=...`）→ `media_id`
 - パラメータはクエリ文字列で送っています。Meta 側がフォーム必須に変わった場合は `threads_client._post` の送り方を要調整。
-- Meta は**コンテナ作成から公開まで少し待つこと**を推奨する場合があります（数十秒程度）。本MVPは即時公開していますが、
-  もし `media not ready` 系のエラーが出る場合は、作成と公開の間に待機を入れる調整が必要です（`logs` を確認）。
+- コンテナ処理中の早すぎる公開による 400「media not ready」は、上記の **FINISHED 待ち**で回避済み。
+  処理が `ERROR`/`EXPIRED`、または約60秒でも `FINISHED` にならない場合は `failed` とし、`error_message`／待機回数を `logs` に残します。
+  待ち時間は `config/settings.py` の `PUBLISH_STATUS_POLL_SECONDS` / `PUBLISH_STATUS_MAX_CHECKS` で調整可能。
 - 投稿には `threads_content_publish` 権限のトークンが必須です。権限不足の場合は `failed` として記録されます。
