@@ -34,8 +34,8 @@ ANALYSIS_LOOKBACK_DAYS = 7  # how many days of posts to analyze each morning
 # --- Publishing safety guards (anti-ban; human-like, conservative pace) ---
 # This tool posts via the official Threads API (threads_content_publish).
 MAX_POSTS_PER_RUN = 1  # at most 1 post per invocation (physically prevents bursts)
-MAX_POSTS_PER_DAY = 1  # at most 1 post per JST calendar day (start conservative)
-MIN_HOURS_BETWEEN_POSTS = 4  # minimum gap since the last successful post
+MAX_POSTS_PER_DAY = 3  # at most 3 posts per JST calendar day
+MIN_HOURS_BETWEEN_POSTS = 0  # 0 = no minimum gap between posts
 POST_WINDOW_START_HOUR = 8  # earliest publish hour (JST), inclusive
 POST_WINDOW_END_HOUR = 22  # latest publish hour (JST), exclusive
 POST_JITTER_MINUTES = 3  # random 0..N min delay before posting to scatter timing

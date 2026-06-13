@@ -243,9 +243,9 @@ def build_queue_rows(
     Daily run: all `count` drafts are candidates for the NEXT day, each at a
     randomized time within the window [POST_WINDOW_START_HOUR,
     POST_WINDOW_END_HOUR) (JST) with a random minute, so times are spread out
-    and never land on the same hour:minute. The human approves one (the publish
-    guard posts at most 1/day); the rest can be edited or left. queue_id is
-    unique per generation run via a timestamp prefix + sequence.
+    and never land on the same hour:minute. The human approves the ones to post
+    (the publish guard caps how many actually go out per day); the rest can be
+    edited or left. queue_id is unique per run via a timestamp prefix + sequence.
     """
     stamp = now.astimezone(JST).strftime("%Y%m%d%H%M")
     next_day = now.astimezone(JST).date() + timedelta(days=1)

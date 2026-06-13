@@ -5,6 +5,7 @@
 secrets/
 service_account*.json
 *-sa.json
+.streamlit/secrets.toml
 
 # Python
 __pycache__/

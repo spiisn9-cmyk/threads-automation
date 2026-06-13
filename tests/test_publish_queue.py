@@ -161,26 +161,55 @@ def test_out_of_window_at_end_hour_posts_nothing():
     assert result["posted"] == 0
 
 
-def test_daily_cap_reached_posts_nothing():
-    # one post already today (7:00, >4h before noon so interval is NOT the blocker)
+def test_daily_cap_default_three_blocks_after_three_today():
+    # Default MAX_POSTS_PER_DAY == 3: three posts already today -> 4th is blocked.
     sheets = FakeSheets(
         [
-            _row("done", STATUS_POSTED, EARLIER, posted_at="2026-06-10T07:00:00+0900"),
+            _row("d1", STATUS_POSTED, EARLIER, posted_at="2026-06-10T08:00:00+0900"),
+            _row("d2", STATUS_POSTED, EARLIER, posted_at="2026-06-10T09:00:00+0900"),
+            _row("d3", STATUS_POSTED, EARLIER, posted_at="2026-06-10T10:00:00+0900"),
             _row("q1", STATUS_APPROVED, PAST),
         ]
     )
     threads = FakeThreads()
     logs: list[tuple] = []
-    result = run_publish(
-        sheets, threads, NOON, log=lambda *a: logs.append(a), max_per_day=1
-    )
+    result = run_publish(sheets, threads, NOON, log=lambda *a: logs.append(a))
     assert result["posted"] == 0
     assert threads.created == []
     assert any("日次上限" in a[2] for a in logs)
 
 
-def test_min_interval_blocks_recent_post():
-    # last post 2h ago; min interval 4h. Raise daily cap so interval is the blocker.
+def test_under_daily_cap_allows_post():
+    # Default cap 3: two posts today -> a third is still allowed.
+    sheets = FakeSheets(
+        [
+            _row("d1", STATUS_POSTED, EARLIER, posted_at="2026-06-10T08:00:00+0900"),
+            _row("d2", STATUS_POSTED, EARLIER, posted_at="2026-06-10T09:00:00+0900"),
+            _row("q1", STATUS_APPROVED, PAST),
+        ]
+    )
+    threads = FakeThreads()
+    result = run_publish(sheets, threads, NOON)
+    assert result["posted"] == 1
+    assert threads.created == ["hello"]
+
+
+def test_default_min_interval_zero_allows_back_to_back():
+    # Default MIN_HOURS_BETWEEN_POSTS == 0: a post 1 minute ago does NOT block.
+    sheets = FakeSheets(
+        [
+            _row("done", STATUS_POSTED, PAST, posted_at="2026-06-10T11:59:00+0900"),
+            _row("q1", STATUS_APPROVED, PAST),
+        ]
+    )
+    threads = FakeThreads()
+    result = run_publish(sheets, threads, NOON)  # uses defaults
+    assert result["posted"] == 1
+    assert threads.created == ["hello"]
+
+
+def test_min_interval_guard_still_works_when_configured():
+    # The interval mechanism is intact if re-enabled: 2h gap < min_hours=4 -> skip.
     sheets = FakeSheets(
         [
             _row("done", STATUS_POSTED, PAST, posted_at="2026-06-10T10:00:00+0900"),
@@ -190,25 +219,11 @@ def test_min_interval_blocks_recent_post():
     threads = FakeThreads()
     logs: list[tuple] = []
     result = run_publish(
-        sheets, threads, NOON, log=lambda *a: logs.append(a), max_per_day=99
+        sheets, threads, NOON, log=lambda *a: logs.append(a), min_hours=4
     )
     assert result["posted"] == 0
     assert threads.created == []
     assert any("最小間隔" in a[2] for a in logs)
-
-
-def test_min_interval_ok_allows_post():
-    # last post 5h ago (>4h); daily cap raised so only interval matters.
-    sheets = FakeSheets(
-        [
-            _row("done", STATUS_POSTED, EARLIER, posted_at="2026-06-10T07:00:00+0900"),
-            _row("q1", STATUS_APPROVED, PAST),
-        ]
-    )
-    threads = FakeThreads()
-    result = run_publish(sheets, threads, NOON, max_per_day=99)
-    assert result["posted"] == 1
-    assert threads.created == ["hello"]
 
 
 def test_jitter_sleep_runs_before_publish():

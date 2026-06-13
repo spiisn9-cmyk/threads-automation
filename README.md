@@ -178,7 +178,7 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
    python -m src.jobs.generate_drafts
    ```
    `prompts/post_drafts.md`（うにの文体ガイド）をシステムプロンプトに、`learnings`（効く型/避ける型）＋`posts.rating`（good/bad）＋`notes` の未使用小言＋`references` の型のお手本＋直近の投稿内容を入力として、
-   Claude が5つの柱に沿って **翌日分の候補を 3本**（`DAILY_DRAFT_COUNT`）生成し、`post_queue` に `status=draft` で書き込みます（公開投稿の安全ガードにより実際に出るのは1日1本まで＝残りは候補）。
+   Claude が5つの柱に沿って **翌日分の候補を 3本**（`DAILY_DRAFT_COUNT`）生成し、`post_queue` に `status=draft` で書き込みます（公開投稿の安全ガードにより実際に出るのは1日最大3本＝承認したものだけ）。
    使った小言は `notes.status=used` に更新されます。小言が足りない分は5つの柱から「事実を必要としない一般的な学び・考え・お役立ち」で補完します。`references`/`learnings` が無い場合は従来どおり（小言＋柱）で生成します。
    詳細は後述の「日々の学習ループ」を参照。
 
@@ -210,7 +210,7 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 
 1. **時間帯ガード** — 現在(JST)が投稿可能時間帯の外なら 0本（`logs` に「時間帯外スキップ」）
 2. **日次上限** — 今日(JST)の投稿数が上限に達していたら 0本（「日次上限スキップ」）
-3. **最小間隔** — 直近の投稿から最小間隔(時間)未満なら 0本（「最小間隔スキップ」）
+3. **最小間隔** — 直近の投稿から最小間隔(時間)未満なら 0本（「最小間隔スキップ」）。既定 `0` = 無効（間隔制約なし）
 4. **1回1本** — 通過しても投稿するのは先頭1本だけ。残りは次回以降に持ち越し
 5. **ジッター** — 投稿直前に 0〜数分（既定3分）のランダム待機を入れ、`:05` など規則的な分を崩す
 
@@ -221,15 +221,15 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 | 定数 | 既定 | 意味 |
 |------|------|------|
 | `MAX_POSTS_PER_RUN` | 1 | 1回の実行で投稿する最大数（連投を物理的に防止） |
-| `MAX_POSTS_PER_DAY` | 1 | 1日(JST)の最大投稿数 |
-| `MIN_HOURS_BETWEEN_POSTS` | 4 | 直近の投稿からの最小間隔（時間） |
+| `MAX_POSTS_PER_DAY` | 3 | 1日(JST)の最大投稿数 |
+| `MIN_HOURS_BETWEEN_POSTS` | 0 | 直近の投稿からの最小間隔（時間）。`0`=制約なし |
 | `POST_WINDOW_START_HOUR` | 8 | 投稿可能時間帯(JST)の開始（含む） |
 | `POST_WINDOW_END_HOUR` | 22 | 投稿可能時間帯(JST)の終了（含まない） |
 | `POST_JITTER_MINUTES` | 3 | 投稿直前のランダム待機の最大（分） |
 
 > **接続の堅牢性**: ジッターのsleep後に Google Sheets の接続（httplib2 のソケット）が切れていても落ちないよう、`SheetsClient` は一過性エラー（接続リセット・5xx・429 等）で**自動リトライ＋接続を再確立**します。`POST_JITTER_MINUTES` を長くしてもこの問題は再発しませんが、既定は短め（3分）にしてあります。
 
-慣れてきてペースを上げたい場合は `MAX_POSTS_PER_DAY` を少しずつ増やす運用を推奨します（まずは1から）。
+現在は1日最大3本・間隔制約なし（同一実行での連投だけは `MAX_POSTS_PER_RUN=1` で不可）。ペースを抑えたい場合は `MAX_POSTS_PER_DAY` を下げる／`MIN_HOURS_BETWEEN_POSTS` を 1 以上にしてください。
 下書きの予約時刻も、この時間帯(8〜22時JST)内で毎日時・分をばらつかせて自動割り当てされます。
 
 ### スケジュール実行（GitHub Actions）
@@ -273,6 +273,52 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 
 設定の定数（`config/settings.py`）: `DAILY_DRAFT_COUNT=3` / `ANALYSIS_LOOKBACK_DAYS=7`。
 スケジュール: `generate_drafts.yml` は日次（`0 22 * * *` UTC = 07:00 JST、日報の後）。分析は `run_daily` 内包なので `daily.yml` は変更なし。
+
+## 🖥 管理ダッシュボード（Streamlit）
+
+スマホからでも候補レビュー・承認・評価・小言追加ができる管理画面です。
+**Google Sheets の読み書きだけ**で動き、Threads/Anthropic API は使いません（秘密情報は増えません）。
+
+機能:
+- **候補レビュー**: `post_queue` の `draft` をカード表示。本文・予定時刻を編集して「✅承認」(→`approved`) または「💾下書き保存」。
+- **予定・実績**: `approved`/`posted`/`failed` 一覧＋投稿済み(`posts`)の views/likes 一覧。👍/👎 で `rating`(good/bad)、`feedback` も入力。
+- **小言**: 入力して「➕追加」→ `notes` に `created_at=今日, status=new` で追記。
+- **数値サマリ**（サイドバー）: `metrics_daily` の最新 followers/views と推移グラフ。
+
+書き込みは `SheetsClient` 経由で `queue_id`/`post_id` をキーに**該当行だけ冪等更新**（他の列は保持）。操作後は自動で再読込します。
+
+### ローカル実行
+
+```bash
+pip install -r requirements.txt   # streamlit を含む
+# 認証情報は .env でも .streamlit/secrets.toml でも可
+export DASHBOARD_PASSWORD=お好きなパスワード
+streamlit run dashboard/app.py
+```
+
+`GOOGLE_SA_JSON` / `SPREADSHEET_ID` は既存の `.env`（このリポジトリの設定）から読まれます。
+`.streamlit/secrets.toml` を使う場合の例:
+
+```toml
+DASHBOARD_PASSWORD = "お好きなパスワード"
+SPREADSHEET_ID = "1uuHteLoOsQ-..."
+GOOGLE_SA_JSON = '''{"type":"service_account","project_id":"...","private_key":"..."}'''
+```
+
+### Streamlit Community Cloud へのデプロイ
+
+1. リポジトリを GitHub に push（`.env` や鍵はコミットしない）。
+2. share.streamlit.io で **New app** → リポジトリ／ブランチを選択、**Main file path** に `dashboard/app.py` を指定。
+3. **Advanced settings → Secrets** に以下を貼り付け（TOML形式）:
+   ```toml
+   DASHBOARD_PASSWORD = "..."
+   SPREADSHEET_ID = "..."
+   GOOGLE_SA_JSON = '''{ ...service account JSON... }'''
+   ```
+4. Deploy。初回アクセス時にパスワードを入力（未入力/不一致では中身を表示しません）。
+   - サービスアカウントの `client_email` を対象スプレッドシートに「編集者」で共有しておくこと。
+
+> 必要な secrets は **`GOOGLE_SA_JSON` / `SPREADSHEET_ID` / `DASHBOARD_PASSWORD`** の3つだけです。
 
 ## ⚠️ 要確認（Meta API の不確実性）
 
