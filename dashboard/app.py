@@ -25,7 +25,12 @@ from src.utils.logging_setup import setup_logging
 setup_logging()
 logger = logging.getLogger("dashboard")
 
-st.set_page_config(page_title="Threads 運用ダッシュボード", page_icon="🧵", layout="centered")
+st.set_page_config(page_title="Threads 運用ダッシュボード", page_icon="🧵", layout="wide")
+
+# Number of side-by-side columns for the candidate cards on wide screens.
+# Streamlit stacks columns vertically on narrow screens, so this stays readable
+# on mobile.
+_REVIEW_COLUMNS = 2
 
 
 def _secret(key: str) -> str | None:
@@ -106,6 +111,23 @@ def _sidebar(sheets) -> None:
         st.rerun()
 
 
+def _draft_card(sheets, d) -> None:
+    qid = str(d.get("queue_id", ""))
+    with st.container(border=True):
+        st.caption(f"{qid} ／ theme: {d.get('theme', '')}")
+        text = st.text_area("本文", value=d.get("text", ""), height=180, key=f"text_{qid}")
+        sched = st.text_input(
+            "予定時刻 (YYYY-MM-DD HH:MM)",
+            value=service.normalize_scheduled_at(d.get("scheduled_at", "")),
+            key=f"sched_{qid}",
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("✅ 承認", key=f"ap_{qid}", use_container_width=True):
+            _run_write("承認", service.approve_draft, sheets, qid, text, sched)
+        if c2.button("💾 下書き保存", key=f"sv_{qid}", use_container_width=True):
+            _run_write("下書き保存", service.save_draft, sheets, qid, text, sched)
+
+
 def _tab_review(sheets) -> None:
     try:
         drafts = service.read_drafts(sheets)
@@ -114,26 +136,18 @@ def _tab_review(sheets) -> None:
         st.error(f"候補の取得に失敗: {exc}")
         return
 
-    st.subheader(f"候補レビュー（draft: {len(drafts)}）")
+    st.markdown(f"### 候補レビュー（draft: {len(drafts)}）")
     if not drafts:
         st.info("レビュー待ちの下書きはありません。")
         return
 
-    for d in drafts:
-        qid = str(d.get("queue_id", ""))
-        with st.container(border=True):
-            st.caption(f"{qid} ／ theme: {d.get('theme', '')}")
-            text = st.text_area("本文", value=d.get("text", ""), height=160, key=f"text_{qid}")
-            sched = st.text_input(
-                "予定時刻 (YYYY-MM-DD HH:MM)",
-                value=service.normalize_scheduled_at(d.get("scheduled_at", "")),
-                key=f"sched_{qid}",
-            )
-            c1, c2 = st.columns(2)
-            if c1.button("✅ 承認", key=f"ap_{qid}", use_container_width=True):
-                _run_write("承認", service.approve_draft, sheets, qid, text, sched)
-            if c2.button("💾 下書き保存", key=f"sv_{qid}", use_container_width=True):
-                _run_write("下書き保存", service.save_draft, sheets, qid, text, sched)
+    # Lay cards out across N columns on wide screens; Streamlit stacks them
+    # vertically on narrow/mobile screens automatically.
+    cols = st.columns(_REVIEW_COLUMNS, gap="large")
+    for i, d in enumerate(drafts):
+        with cols[i % _REVIEW_COLUMNS]:
+            _draft_card(sheets, d)
+            st.write("")  # vertical breathing room between stacked cards
 
 
 def _tab_schedule(sheets) -> None:
