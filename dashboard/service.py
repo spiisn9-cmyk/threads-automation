@@ -21,6 +21,7 @@ from src.core.queue import (
     parse_jst,
     rows_to_dicts,
 )
+from src.core.tags import join_tags
 from src.core.upsert import METRICS_DAILY_SHEET, POSTS_SHEET
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,40 @@ def set_post_rating(
     if feedback is not None:
         changes["feedback"] = feedback
     _merge_upsert(sheets, POSTS_SHEET, "post_id", post_id, changes)
+
+
+def save_post_feedback(
+    sheets: SheetsLike,
+    post_id: str,
+    tags: list[str],
+    rating: str,
+    feedback: str,
+) -> None:
+    """Update a posted item's technique tags + rating + feedback (preserving metrics)."""
+    _merge_upsert(
+        sheets,
+        POSTS_SHEET,
+        "post_id",
+        post_id,
+        {"tags": join_tags(tags), "rating": rating, "feedback": feedback},
+    )
+
+
+def save_queue_feedback(
+    sheets: SheetsLike,
+    queue_id: str,
+    tags: list[str],
+    rating: str,
+    feedback: str,
+) -> None:
+    """Update a draft/candidate's tags + rating + feedback (preserving text/status)."""
+    _merge_upsert(
+        sheets,
+        POST_QUEUE_SHEET,
+        "queue_id",
+        queue_id,
+        {"tags": join_tags(tags), "rating": rating, "feedback": feedback},
+    )
 
 
 # --- notes ---

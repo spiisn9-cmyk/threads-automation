@@ -105,9 +105,13 @@ def _build_user_content(
 
 
 def _record_post(
-    sheets: SheetsClient, post: PostMetric, rating: str = "", feedback: str = ""
+    sheets: SheetsClient,
+    post: PostMetric,
+    rating: str = "",
+    feedback: str = "",
+    tags: str = "",
 ) -> None:
-    # rating/feedback are human-entered; pass through existing values so the
+    # rating/feedback/tags are human-entered; pass through existing values so the
     # daily metrics refresh (upsert overwrites the whole row) doesn't wipe them.
     sheets.upsert_row(
         POSTS_SHEET,
@@ -121,17 +125,22 @@ def _record_post(
             "likes": post.likes,
             "rating": rating,
             "feedback": feedback,
+            "tags": tags,
         },
     )
 
 
-def _existing_post_meta(sheets: SheetsClient) -> dict[str, tuple[str, str]]:
-    """Map post_id -> (rating, feedback) from the current posts sheet."""
-    meta: dict[str, tuple[str, str]] = {}
+def _existing_post_meta(sheets: SheetsClient) -> dict[str, dict[str, str]]:
+    """Map post_id -> {rating, feedback, tags} from the current posts sheet."""
+    meta: dict[str, dict[str, str]] = {}
     for d in rows_to_dicts(sheets.read_rows(POSTS_SHEET, "A1:ZZ")):
         pid = str(d.get("post_id", ""))
         if pid:
-            meta[pid] = (str(d.get("rating", "")), str(d.get("feedback", "")))
+            meta[pid] = {
+                "rating": str(d.get("rating", "")),
+                "feedback": str(d.get("feedback", "")),
+                "tags": str(d.get("tags", "")),
+            }
     return meta
 
 
@@ -208,16 +217,22 @@ def run() -> int:
         except Exception as exc:
             logger.error("upsert_daily failed: %s", exc)
             failures.append(f"metrics_daily書き込み: {exc}")
-        # Preserve any human-entered rating/feedback across the metrics refresh.
+        # Preserve any human-entered rating/feedback/tags across the metrics refresh.
         try:
             existing_meta = _existing_post_meta(sheets)
         except Exception as exc:
             logger.error("reading existing post meta failed: %s", exc)
             existing_meta = {}
         for p in posts:
-            rating, feedback = existing_meta.get(p.post_id, ("", ""))
+            meta = existing_meta.get(p.post_id, {})
             try:
-                _record_post(sheets, p, rating=rating, feedback=feedback)
+                _record_post(
+                    sheets,
+                    p,
+                    rating=meta.get("rating", ""),
+                    feedback=meta.get("feedback", ""),
+                    tags=meta.get("tags", ""),
+                )
             except Exception as exc:
                 logger.error("posts write failed for %s: %s", p.post_id, exc)
                 failures.append(f"posts書き込み({p.post_id}): {exc}")

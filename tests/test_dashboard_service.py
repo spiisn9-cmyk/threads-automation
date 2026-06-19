@@ -197,6 +197,42 @@ def test_metrics_empty_returns_none():
     assert service.metrics_series(sheets) == {"dates": [], "followers": [], "views": []}
 
 
+def test_save_post_feedback_joins_tags_and_preserves_metrics():
+    sheets = FakeSheets(
+        {
+            "posts": [
+                POSTS_HEADER + ["tags"],
+                ["p1", "2026-06-13", "本文", "300", "20", "", "", ""],
+            ]
+        }
+    )
+    service.save_post_feedback(sheets, "p1", ["問いかけ", "具体・数字"], "good", "数字が効いた")
+    row = sheets.dicts("posts")[0]
+    assert row["tags"] == "問いかけ | 具体・数字"  # joined
+    assert row["rating"] == "good"
+    assert row["feedback"] == "数字が効いた"
+    assert row["views"] == "300" and row["likes"] == "20"  # preserved
+
+
+def test_save_post_feedback_drops_invalid_tags():
+    sheets = FakeSheets(
+        {"posts": [POSTS_HEADER + ["tags"], ["p1", "2026-06-13", "本文", "1", "0", "", "", ""]]}
+    )
+    service.save_post_feedback(sheets, "p1", ["フック", "ニセタグ"], "ok", "")
+    assert sheets.dicts("posts")[0]["tags"] == "フック"  # invalid removed
+
+
+def test_save_queue_feedback_preserves_text_and_status():
+    sheets = FakeSheets(_queue([_qrow("q1", STATUS_DRAFT, "2026-06-15 09:00", text="原文")]))
+    service.save_queue_feedback(sheets, "q1", ["共感"], "bad", "弱い")
+    row = sheets.dicts(POST_QUEUE_SHEET)[0]
+    assert row["tags"] == "共感"
+    assert row["rating"] == "bad"
+    assert row["feedback"] == "弱い"
+    assert row["status"] == STATUS_DRAFT  # not changed by feedback save
+    assert row["text"] == "原文"  # not changed
+
+
 def test_merge_upsert_missing_key_raises():
     sheets = FakeSheets(_queue([_qrow("q1", STATUS_DRAFT, "2026-06-15 09:00")]))
     try:

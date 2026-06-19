@@ -31,9 +31,12 @@ from config.settings import (
     POST_WINDOW_START_HOUR,
     load_settings,
 )
+from collections import Counter
+
 from src.core.learnings import Learning, read_recent_learnings
 from src.core.notes import NewNote, mark_note_used, read_new_notes
 from src.core.references import Reference, read_active_references
+from src.core.tags import normalize_tags, split_tags
 from src.core.queue import (
     POST_QUEUE_HEADER,
     POST_QUEUE_SHEET,
@@ -93,6 +96,41 @@ def _rated_posts(sheets: SheetsLike, limit: int = 5) -> tuple[list[str], list[st
     return good[:limit], bad[:limit]
 
 
+def _feedback_signals(sheets: SheetsLike, limit: int = 5) -> dict[str, Any]:
+    """Aggregate technique tags + one-line feedback from posts AND post_queue.
+
+    good rows -> techniques to lean toward; bad rows -> points to reinforce/avoid.
+    """
+    good_tags: Counter = Counter()
+    bad_tags: Counter = Counter()
+    good_ex: list[tuple[str, list[str], str]] = []
+    bad_ex: list[tuple[str, list[str], str]] = []
+
+    rows = rows_to_dicts(sheets.read_rows(POSTS_SHEET, "A1:ZZ")) + rows_to_dicts(
+        sheets.read_rows(POST_QUEUE_SHEET, "A1:ZZ")
+    )
+    for r in rows:
+        rating = str(r.get("rating", "")).strip().lower()
+        tags = normalize_tags(split_tags(r.get("tags", "")))
+        text = str(r.get("text", "")).replace("\n", " ")[:60]
+        fb = str(r.get("feedback", "")).strip()
+        if rating == "good":
+            good_tags.update(tags)
+            if text or fb:
+                good_ex.append((text, tags, fb))
+        elif rating == "bad":
+            bad_tags.update(tags)
+            if text or fb:
+                bad_ex.append((text, tags, fb))
+
+    return {
+        "good_tags": [t for t, _ in good_tags.most_common()],
+        "bad_tags": [t for t, _ in bad_tags.most_common()],
+        "good_examples": good_ex[:limit],
+        "bad_examples": bad_ex[:limit],
+    }
+
+
 def _build_user_content(
     top_posts: list[dict[str, Any]],
     count: int,
@@ -101,6 +139,7 @@ def _build_user_content(
     learnings: list[Learning],
     good_posts: list[str],
     bad_posts: list[str],
+    feedback: dict[str, Any],
 ) -> str:
     lines = [f"以下を参考に、投稿の下書きを{count}本作ってください。", ""]
 
@@ -161,6 +200,32 @@ def _build_user_content(
                 lines.append(f"  ✕ {t}")
         lines.append("")
 
+    good_tags = feedback.get("good_tags") or []
+    bad_tags = feedback.get("bad_tags") or []
+    good_ex = feedback.get("good_examples") or []
+    bad_ex = feedback.get("bad_examples") or []
+    if good_tags or bad_tags or good_ex or bad_ex:
+        lines.append("## 技法フィードバック（タグ＋一言。学習して反映）")
+        if good_tags:
+            lines.append(
+                "good/伸びた投稿でよく使われた技法 → これらの型に寄せる: "
+                + ", ".join(good_tags)
+            )
+        if bad_tags:
+            lines.append(
+                "bad/弱いとされた投稿の技法・指摘 → 補強または回避する: "
+                + ", ".join(bad_tags)
+            )
+        for text, tags, fb in good_ex:
+            tagstr = " / ".join(tags) if tags else "-"
+            note = f" / 一言: {fb}" if fb else ""
+            lines.append(f"  ◎ [{tagstr}] {text}{note}")
+        for text, tags, fb in bad_ex:
+            tagstr = " / ".join(tags) if tags else "-"
+            note = f" / 一言: {fb}" if fb else ""
+            lines.append(f"  ✕ [{tagstr}] {text}{note}")
+        lines.append("")
+
     lines.append("## 反応が良かった投稿（内容の傾向の参考。数値は出さない）")
     if top_posts:
         for p in top_posts:
@@ -192,7 +257,8 @@ def _build_user_content(
         "全部を同じ長さに揃えず、普段は短め中心、1本程度は熱量のある長文を混ぜる。"
     )
     lines.append(
-        "改善方針: badと評価された型・低反応だった型を避け、good/伸びた型に寄せて改善する。"
+        "改善方針: good・伸びた投稿でよく使われた技法に寄せ、badや一言で指摘された点は補強・回避する。"
+        "低反応だった型も避ける。"
         "ただし小言の事実は創作しない／参考・型は丸写ししない／数値(フォロワー・views)は投稿に出さない。"
     )
     return "\n".join(lines)
@@ -270,8 +336,12 @@ def build_queue_rows(
             "status": STATUS_DRAFT,
             "posted_post_id": "",
             "posted_at": "",
+            "tags": "",
+            "rating": "",
+            "feedback": "",
         }
-        rows.append([row_dict[col] for col in POST_QUEUE_HEADER])
+        # Default any columns not set here (forward-compatible with new columns).
+        rows.append([row_dict.get(col, "") for col in POST_QUEUE_HEADER])
     return rows
 
 
@@ -290,9 +360,11 @@ def generate(
     references = read_active_references(sheets)  # swipe-file: learn structure only
     learnings = read_recent_learnings(sheets)  # steer toward what works
     good_posts, bad_posts = _rated_posts(sheets)  # lean to good, avoid bad
+    feedback = _feedback_signals(sheets)  # technique tags + one-line notes
     # Growth metrics are intentionally not read here — see _build_user_content.
     user_content = _build_user_content(
-        top_posts, count, notes_to_use, references, learnings, good_posts, bad_posts
+        top_posts, count, notes_to_use, references, learnings,
+        good_posts, bad_posts, feedback,
     )
 
     raw = claude.generate(system_prompt, user_content)

@@ -32,8 +32,10 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 SHEETS: dict[str, list[str]] = {
     "metrics_daily": ["date", "followers", "views", "follower_delta", "note"],
-    # rating (good/ok/bad) and feedback are human-entered; appended at the end.
-    "posts": ["post_id", "posted_at", "text", "views", "likes", "rating", "feedback"],
+    # rating (good/ok/bad), feedback, tags are human-entered; appended at the end.
+    "posts": [
+        "post_id", "posted_at", "text", "views", "likes", "rating", "feedback", "tags",
+    ],
     "logs": ["datetime", "job", "status", "count", "message"],
     # Phase 2: scheduled post queue (created only if missing; existing sheets untouched).
     POST_QUEUE_SHEET: POST_QUEUE_HEADER,

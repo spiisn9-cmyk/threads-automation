@@ -68,12 +68,22 @@ def test_parse_handles_empty_learnings_and_fence():
     assert "サンプル不足" in res.report_block
 
 
-def test_build_analysis_user_includes_ratings_and_text():
+def test_build_analysis_user_includes_ratings_tags_and_text():
     user = build_analysis_user(
-        [{"text": "投稿A", "views": "100", "likes": "5", "rating": "bad", "feedback": "硬い"}]
+        [
+            {
+                "text": "投稿A",
+                "views": "100",
+                "likes": "5",
+                "rating": "bad",
+                "feedback": "硬い",
+                "tags": "問いかけ | 共感",
+            }
+        ]
     )
     assert "rating=bad" in user
     assert "投稿A" in user
+    assert "tags=問いかけ | 共感" in user
 
 
 def test_build_analysis_user_empty_is_humble():

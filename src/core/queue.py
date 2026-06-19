@@ -20,6 +20,9 @@ POST_QUEUE_HEADER = [
     "status",
     "posted_post_id",
     "posted_at",  # actual publish time (JST); recorded on success
+    "tags",  # technique tags, " | "-joined (human feedback)
+    "rating",  # good / ok / bad (human feedback)
+    "feedback",  # free-text note (human feedback)
 ]
 
 # status values

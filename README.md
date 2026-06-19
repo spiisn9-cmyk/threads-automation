@@ -112,10 +112,10 @@ pytest
 | シート | カラム |
 |--------|--------|
 | `metrics_daily` | date, followers, views, follower_delta, note |
-| `posts` | post_id, posted_at, text, views, likes, rating, feedback |
+| `posts` | post_id, posted_at, text, views, likes, rating, feedback, tags |
 | `logs` | datetime, job, status, count, message |
 | `learnings` | created_at, learning, evidence, source |
-| `post_queue` | queue_id, scheduled_at, text, theme, status, posted_post_id, posted_at |
+| `post_queue` | queue_id, scheduled_at, text, theme, status, posted_post_id, posted_at, tags, rating, feedback |
 | `notes` | created_at, note, theme, status |
 | `references` | created_at, source, impressions, text, learn, active |
 
@@ -260,14 +260,17 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 
 ### 運用フロー：評価(rating)の付け方 → 翌日の生成に反映
 
-1. **投稿の評価を入れる**（任意・いつでも）
-   `posts` シートで、各投稿の `rating` に `good` / `ok` / `bad`、`feedback` に一言メモ（例:「問いかけで終えたら反応良かった」）を入力します。
-   - run_daily は毎朝 views/likes を更新しますが、**あなたが入れた rating/feedback は保持**されます（上書きされません）。
+1. **投稿のフィードバックを入れる**（任意・いつでも）
+   各投稿に **技法タグ＋評価(good/ok/bad)＋一言** を付けます。ダッシュボードが手軽（投稿済み `posts` も下書き候補 `post_queue` も対応）：
+   - **技法タグ**（`tags`）= フック / 共感 / 問いかけ / ストーリー / 具体・数字 / 本音・弱み開示 / 学び・気づき / ギャップ・意外性 / オチ・締め / CTA / リスト・まとめ / 例え・比喩（`src/core/tags.py` で編集可。セル内は ` | ` 連結で保存）
+   - **rating** = `good` / `ok` / `bad`、**feedback** = 一言メモ（例:「問いかけで終えたら反応良かった」）
+   - run_daily は毎朝 views/likes を更新しますが、**手入力した tags/rating/feedback は保持**されます（上書きされません）。
 2. **毎朝、自動で分析される**
-   run_daily が直近7日（`ANALYSIS_LOOKBACK_DAYS`）の投稿を分析し、`learnings` に学びを追記。日報メールにも簡易分析が載ります。
+   run_daily が直近7日（`ANALYSIS_LOOKBACK_DAYS`）の投稿を、tags/rating/feedback 込みで分析し、`learnings` に学び（good傾向の技法タグを含む）を追記。日報メールにも簡易分析が載ります。
    - ⚠️ 投稿数・数値が小さい初期は**断定せず「サンプルが少ない」前提**で控えめに書きます。
 3. **翌日分の下書きに反映される**
-   generate_drafts が `learnings`（効く型/避ける型）＋`posts.rating`（good に寄せ・bad を避ける）＋`references`（型）＋`notes`（内容）を材料に、改善した候補を **3本**（`DAILY_DRAFT_COUNT`）生成します。
+   generate_drafts が `learnings`＋**技法タグ/評価/一言**（`posts`・`post_queue` 両方）＋`references`（型）＋`notes`（内容）を材料に、改善した候補を **3本**（`DAILY_DRAFT_COUNT`）生成します。
+   - **good・伸びた投稿によく使われた技法に寄せ、bad・一言で指摘された点は補強/回避**します。
    - 維持される原則：**小言の事実は創作しない／参考・型は丸写ししない／数値(フォロワー・views)は投稿に出さない。**
 4. 自分でも気づきがあれば `learnings` に `source=uni` で直接追記してOK（生成材料になります）。
 
@@ -280,8 +283,8 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 **Google Sheets の読み書きだけ**で動き、Threads/Anthropic API は使いません（秘密情報は増えません）。
 
 機能:
-- **候補レビュー**: `post_queue` の `draft` をカード表示。本文・予定時刻を編集して「✅承認」(→`approved`) または「💾下書き保存」。
-- **予定・実績**: `approved`/`posted`/`failed` 一覧＋投稿済み(`posts`)の views/likes 一覧。👍/👎 で `rating`(good/bad)、`feedback` も入力。
+- **候補レビュー**: `post_queue` の `draft` をカード表示。本文・予定時刻を編集して「✅承認」(→`approved`) または「💾下書き保存」。さらに **技法タグ＋評価(good/ok/bad)＋一言** を「🏷FB保存」で記録。
+- **予定・実績**: `approved`/`posted`/`failed` 一覧＋投稿済み(`posts`)の views/likes 一覧。各投稿に **技法タグ＋評価(good/ok/bad)＋一言** を付けて「💾保存」。
 - **小言**: 入力して「➕追加」→ `notes` に `created_at=今日, status=new` で追記。
 - **数値サマリ**（サイドバー）: `metrics_daily` の最新 followers/views と推移グラフ。
 

@@ -35,17 +35,18 @@ def build_analysis_user(recent_posts: list[dict[str, Any]]) -> str:
         return "\n".join(lines)
 
     lines.append(f"## 直近の投稿（{len(recent_posts)}件）")
-    lines.append("posted_at | views | likes | rating | feedback | 本文(先頭)")
+    lines.append("posted_at | views | likes | rating | tags | feedback | 本文(先頭)")
     for p in recent_posts:
         text = str(p.get("text", "")).replace("\n", " ")[:60]
         lines.append(
             f"- {p.get('posted_at', '')} | views={p.get('views', '')} | "
             f"likes={p.get('likes', '')} | rating={p.get('rating', '')} | "
-            f"fb={p.get('feedback', '')} | {text}"
+            f"tags={p.get('tags', '')} | fb={p.get('feedback', '')} | {text}"
         )
     lines.append("")
     lines.append(
         "伸びた投稿の共通点／伸びなかった共通点／bad評価の投稿の特徴（避けるべき型）を簡潔に。"
+        "good傾向の投稿によく付いている技法タグ（tags）の傾向にも触れる。"
         f"学びは最大{MAX_LEARNINGS}個、それぞれevidence（根拠）付きで。"
     )
     return "\n".join(lines)

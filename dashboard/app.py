@@ -20,6 +20,7 @@ import streamlit as st
 
 from dashboard import service
 from src.core.queue import STATUS_APPROVED, STATUS_FAILED, STATUS_POSTED
+from src.core.tags import TECHNIQUE_TAGS, parse_tags
 from src.utils.logging_setup import setup_logging
 
 setup_logging()
@@ -74,6 +75,19 @@ def _get_sheets():
     return SheetsClient(sa_json, spreadsheet_id)
 
 
+_RATING_CHOICES = ["未設定", "good", "ok", "bad"]
+
+
+def _rating_radio(current: str, key: str) -> str:
+    """Horizontal good/ok/bad picker; returns '' when 未設定."""
+    cur = current if current in ("good", "ok", "bad") else "未設定"
+    choice = st.radio(
+        "評価", _RATING_CHOICES, index=_RATING_CHOICES.index(cur),
+        horizontal=True, key=key,
+    )
+    return "" if choice == "未設定" else choice
+
+
 def _run_write(label: str, fn, *args) -> None:
     """Run a write op, surface errors in the UI + logs, and refresh on success."""
     try:
@@ -126,6 +140,15 @@ def _draft_card(sheets, d) -> None:
             _run_write("承認", service.approve_draft, sheets, qid, text, sched)
         if c2.button("💾 下書き保存", key=f"sv_{qid}", use_container_width=True):
             _run_write("下書き保存", service.save_draft, sheets, qid, text, sched)
+
+        # Feedback (technique tags + rating + note), saved independently.
+        tags = st.multiselect(
+            "技法タグ", TECHNIQUE_TAGS, default=parse_tags(d.get("tags", "")), key=f"tags_{qid}"
+        )
+        rating = _rating_radio(d.get("rating", ""), key=f"rate_{qid}")
+        fb = st.text_input("一言FB", value=d.get("feedback", ""), key=f"qfb_{qid}")
+        if st.button("🏷 FB保存（タグ/評価/一言）", key=f"qfbsave_{qid}", use_container_width=True):
+            _run_write("FB保存", service.save_queue_feedback, sheets, qid, tags, rating, fb)
 
 
 def _tab_review(sheets) -> None:
@@ -191,20 +214,24 @@ def _tab_schedule(sheets) -> None:
         st.info("posts にデータがありません。")
         return
 
-    for p in posts:
+    cols = st.columns(_REVIEW_COLUMNS, gap="large")
+    for i, p in enumerate(posts):
         pid = str(p.get("post_id", ""))
-        with st.container(border=True):
-            st.write(str(p.get("text", "")).replace("\n", " ")[:120] or "（本文なし）")
-            st.caption(
-                f"views={p.get('views', '-')} ／ likes={p.get('likes', '-')} "
-                f"／ 現在のrating: {p.get('rating', '') or '未評価'}"
-            )
-            fb = st.text_input("feedback（一言メモ）", value=p.get("feedback", ""), key=f"fb_{pid}")
-            c1, c2 = st.columns(2)
-            if c1.button("👍 good", key=f"g_{pid}", use_container_width=True):
-                _run_write("評価(good)", service.set_post_rating, sheets, pid, "good", fb)
-            if c2.button("👎 bad", key=f"b_{pid}", use_container_width=True):
-                _run_write("評価(bad)", service.set_post_rating, sheets, pid, "bad", fb)
+        with cols[i % _REVIEW_COLUMNS]:
+            with st.container(border=True):
+                st.write(str(p.get("text", "")).replace("\n", " ")[:120] or "（本文なし）")
+                st.caption(
+                    f"views={p.get('views', '-')} ／ likes={p.get('likes', '-')}"
+                )
+                tags = st.multiselect(
+                    "技法タグ", TECHNIQUE_TAGS, default=parse_tags(p.get("tags", "")),
+                    key=f"ptags_{pid}",
+                )
+                rating = _rating_radio(p.get("rating", ""), key=f"prate_{pid}")
+                fb = st.text_input("一言FB", value=p.get("feedback", ""), key=f"pfb_{pid}")
+                if st.button("💾 保存（タグ/評価/一言）", key=f"psave_{pid}", use_container_width=True):
+                    _run_write("FB保存", service.save_post_feedback, sheets, pid, tags, rating, fb)
+            st.write("")
 
 
 def _tab_notes(sheets) -> None:
