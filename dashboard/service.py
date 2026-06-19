@@ -21,16 +21,26 @@ from src.core.queue import (
     parse_jst,
     rows_to_dicts,
 )
+from src.core.references import REFERENCES_HEADER, REFERENCES_SHEET
 from src.core.tags import join_tags
 from src.core.upsert import METRICS_DAILY_SHEET, POSTS_SHEET
 
 logger = logging.getLogger(__name__)
 
 
+def _seq_of(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("seq") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class SheetsLike(Protocol):
     def read_rows(self, sheet: str, a1: str) -> list[list[Any]]: ...
 
     def append_row(self, sheet: str, row: list[Any]) -> None: ...
+
+    def update_row(self, sheet: str, a1: str, row: list[Any]) -> None: ...
 
     def upsert_row(
         self, sheet: str, key_col: str, key_val: str, row_dict: dict[str, Any]
@@ -132,6 +142,49 @@ def save_draft(
     )
 
 
+def read_draft_groups(sheets: SheetsLike) -> list[dict[str, Any]]:
+    """Group draft rows into units for review.
+
+    Returns a list of groups in scheduled order. Each group is either:
+      {"is_thread": False, "rows": [single_row]}
+      {"is_thread": True, "thread_id": str, "rows": [parent, reply1, ...]}  (seq order)
+    """
+    drafts = read_drafts(sheets)  # already sorted by scheduled_at
+    groups: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for d in drafts:
+        thread_id = str(d.get("thread_id", "")).strip()
+        if not thread_id:
+            groups.append({"is_thread": False, "thread_id": "", "rows": [d]})
+            continue
+        if thread_id in seen:
+            continue
+        seen.add(thread_id)
+        rows = sorted(
+            (r for r in drafts if str(r.get("thread_id", "")).strip() == thread_id),
+            key=_seq_of,
+        )
+        groups.append({"is_thread": True, "thread_id": thread_id, "rows": rows})
+    return groups
+
+
+def save_rows(
+    sheets: SheetsLike, items: list[dict[str, Any]], approve: bool
+) -> None:
+    """Save text/scheduled_at edits for one or more rows; optionally approve.
+
+    `items` = [{"queue_id", "text", "scheduled_at"(optional)}]. Used for both a
+    single post and a whole thread (bulk approve). Merge-upsert preserves other
+    columns (theme, tags, thread_id, seq, …).
+    """
+    status = STATUS_APPROVED if approve else STATUS_DRAFT
+    for it in items:
+        changes: dict[str, Any] = {"text": it.get("text", ""), "status": status}
+        if "scheduled_at" in it and it["scheduled_at"] is not None:
+            changes["scheduled_at"] = normalize_scheduled_at(it["scheduled_at"])
+        _merge_upsert(sheets, POST_QUEUE_SHEET, "queue_id", str(it["queue_id"]), changes)
+
+
 # --- posts (review / rating) ---
 
 def read_posts(sheets: SheetsLike) -> list[dict[str, Any]]:
@@ -184,6 +237,67 @@ def save_queue_feedback(
         "queue_id",
         queue_id,
         {"tags": join_tags(tags), "rating": rating, "feedback": feedback},
+    )
+
+
+# --- references (swipe file) ---
+
+def _bool_cell(value: bool) -> str:
+    return "TRUE" if value else "FALSE"
+
+
+def add_reference(
+    sheets: SheetsLike,
+    source: str,
+    text: str,
+    structure_note: str,
+    is_thread: bool,
+    active: bool,
+    today: str,
+) -> None:
+    """Append a reference row in REFERENCES_HEADER order.
+
+    Header: created_at, source, impressions, text, learn, active, structure_note, is_thread.
+    impressions/learn are legacy columns (left blank).
+    """
+    if not (text or "").strip() and not (structure_note or "").strip():
+        raise ValueError("参考本文か構成メモのどちらかは必要です")
+    row_dict = {
+        "created_at": today,
+        "source": source,
+        "impressions": "",
+        "text": text,
+        "learn": "",
+        "active": _bool_cell(active),
+        "structure_note": structure_note,
+        "is_thread": _bool_cell(is_thread),
+    }
+    sheets.append_row(REFERENCES_SHEET, [row_dict.get(c, "") for c in REFERENCES_HEADER])
+
+
+def list_references(sheets: SheetsLike) -> list[dict[str, Any]]:
+    """All references with their 1-based sheet row index (for toggling active)."""
+    rows = sheets.read_rows(REFERENCES_SHEET, "A1:ZZ")
+    out: list[dict[str, Any]] = []
+    for offset, d in enumerate(rows_to_dicts(rows), start=2):  # row 1 is header
+        d = dict(d)
+        d["row_index"] = offset
+        out.append(d)
+    return out
+
+
+def set_reference_active(sheets: SheetsLike, row_index: int, active: bool) -> None:
+    """Flip a reference's `active` flag, preserving the rest of the row."""
+    rows = sheets.read_rows(REFERENCES_SHEET, "A1:ZZ")
+    dicts = rows_to_dicts(rows)
+    i = row_index - 2  # data row index
+    if i < 0 or i >= len(dicts):
+        raise ValueError(f"references row {row_index} が見つかりません")
+    merged = {**dicts[i], "active": _bool_cell(active)}
+    sheets.update_row(
+        REFERENCES_SHEET,
+        f"A{row_index}",
+        [merged.get(c, "") for c in REFERENCES_HEADER],
     )
 
 

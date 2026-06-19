@@ -121,7 +121,7 @@ pytest
 
 `post_queue.status` は `draft` → `approved` → `posted` / `failed` の4状態です。
 `notes.status` は `new`（未使用）→ `used`（下書きに反映済み）の2状態です。
-`references.active` は `active`（学習対象）/ `off`（無視）の2値です。`is_thread` が真（true/yes/1/ツリー等）なら連投の型として学びます。
+`references.active` は `TRUE`（学習対象）/ `FALSE`（無視）。`is_thread` が `TRUE` なら連投の型として学びます（旧値 `active`/`off` も後方互換で解釈）。
 `post_queue.thread_id`/`seq` はツリー（連投）用：同じ `thread_id` でグループ、`seq`=0 が親・1.. が返信。空なら単発投稿です。
 `posts.rating` は `good`/`ok`/`bad`（うに手入力）、`feedback` は一言メモ。`learnings.source` は `auto`（分析が追記）/ `uni`（うにが追記）。
 
@@ -286,6 +286,7 @@ publish_queue (毎時)    →  approved かつ scheduled_at<=現在 の行だけ
 機能:
 - **候補レビュー**: `post_queue` の `draft` をカード表示。本文・予定時刻を編集して「✅承認」(→`approved`) または「💾下書き保存」。さらに **技法タグ＋評価(good/ok/bad)＋一言** を「🏷FB保存」で記録。
 - **予定・実績**: `approved`/`posted`/`failed` 一覧＋投稿済み(`posts`)の views/likes 一覧。各投稿に **技法タグ＋評価(good/ok/bad)＋一言** を付けて「💾保存」。
+- **参考投稿**: 伸びてる投稿を `references` に追加（source / 本文 / structure_note / ツリーか / active）。一覧の `active` をその場で切替。
 - **小言**: 入力して「➕追加」→ `notes` に `created_at=今日, status=new` で追記。
 - **数値サマリ**（サイドバー）: `metrics_daily` の最新 followers/views と推移グラフ。
 
@@ -330,24 +331,25 @@ GOOGLE_SA_JSON = '''{"type":"service_account","project_id":"...","private_key":"
 伸びている投稿を `references` に貼り、**型・フック・ツリーの組み立て**だけを学んでオリジナルを作ります。
 
 - `source`: URL / ハンドル
+- `text`: 参考本文（**構造分析のためだけ**。生成では丸写ししない。ツリーなら各投稿を改行で）
 - `structure_note`: 型・フック・（ツリーなら）親→返信の組み立てメモ（一番大事）
-- `text`: 参考本文（**構造分析のためだけ**。生成では丸写ししない）
-- `is_thread`: 連投の例なら `true`
-- `active`: `active` で学習対象
+- `is_thread`: 連投の例なら `TRUE`
+- `active`: 学習対象なら `TRUE`（`FALSE` で除外）
 
+ダッシュボードの **「📚 参考投稿」タブ** から追加でき（source / 参考本文 / structure_note / ツリーか / active）、一覧の `active` をその場でオン/オフできます。
 generate_drafts は active な references の `structure_note`/`text` から**構成だけ**を学び、中身はうに自身（小言／5つの柱／技法タグ）でオリジナルに書きます。
 **本文・トピック・固有表現の丸写しは禁止**（プロンプトに明示）。`is_thread` の参考があると、候補の一部をツリー型にする指示が入ります。
 
 ### ツリー（連投）の作り方・投稿
 - **生成**: モデルが候補をツリー型にすると、`post_queue` に親（`seq=0`）＋返信（`seq=1,2…`）が同じ `thread_id` で入ります。
-- **承認**: ダッシュボードで親・返信それぞれを編集／承認（`approved`）。
-- **投稿（既定 = 安全運用）**: `publish_queue` は親を投稿 → 返信は **前の投稿が公開済みになってから** `reply_to_id` で順に繋げて投稿します。
-  - 既定では「1回1本」ガードを守るため、返信は次回以降の実行で順次公開（前のreplyにぶら下げ）。親→返信1→返信2…と正しく連なります。
-  - 前の投稿が未公開の返信は自動で**保留**（`logs` に記録）。
-- **短間隔オプション**: `config/settings.py` の `PUBLISH_THREAD_REPLIES_INLINE=True` にすると、**1スレッドを1回の実行でまとめて連投**（`THREAD_REPLY_DELAY_SECONDS` 間隔）。時間帯・日次上限ガードは維持（スレッドは1実行=1ユニット扱い）。
-  - まずは既定（親のみ自動、返信は順次）での運用を推奨。慣れてきたらインライン連投を検討してください。
+- **承認**: ダッシュボードの候補レビューで、ツリーは**親＋返信を1カードでまとめて表示**。「✅ツリーを承認」で全行をまとめて `approved` に。親の予定時刻だけが公開タイミングを決めます。
+- **投稿**: `publish_queue` は、親が approved＋due になったら **1回の実行でツリー全体をまとめて公開**します。
+  - 親を投稿 → `FINISHED` 確認 → 公開 → media_id 取得 → 返信を `seq` 順に `reply_to_id=親` で投稿（各 `FINISHED` 待ち＋数秒の小休止）。
+  - **スレッド全体で“1投稿”として日次上限（`MAX_POSTS_PER_DAY`）を1だけ消費**（返信は上限を消費しない）。`MAX_POSTS_PER_RUN` もスレッド単位で1。
+  - 失敗時は**スレッド単位で failed**＋根本例外を `logs` に記録（公開済みの先頭は保持し二重投稿しない／残りは failed）。
+  - 返信間隔は `config/settings.py` の `THREAD_REPLY_DELAY_SECONDS`。
 
-> いずれの方式でも、コンテナ `FINISHED` 待ち・接続リトライ・二重投稿防止は維持されます。
+> コンテナ `FINISHED` 待ち・接続リトライ・二重投稿防止・時間帯/間隔ガードはすべて維持されます。
 
 ## ⚠️ 要確認（Meta API の不確実性）
 

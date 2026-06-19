@@ -151,25 +151,57 @@ def _draft_card(sheets, d) -> None:
             _run_write("FB保存", service.save_queue_feedback, sheets, qid, tags, rating, fb)
 
 
+def _thread_card(sheets, group) -> None:
+    """A whole thread (parent + replies) shown as one card with bulk approve."""
+    rows = group["rows"]
+    tid = group["thread_id"]
+    parent = rows[0]
+    with st.container(border=True):
+        st.caption(f"🧵 ツリー {tid} ／ {len(rows)}投稿 ／ theme: {parent.get('theme', '')}")
+        items: list[dict] = []
+        for n, r in enumerate(rows):
+            qid = str(r.get("queue_id", ""))
+            label = "親" if n == 0 else f"返信{n}"
+            text = st.text_area(label, value=r.get("text", ""), height=140, key=f"text_{qid}")
+            item = {"queue_id": qid, "text": text}
+            if n == 0:  # only the parent's scheduled_at drives publishing
+                sched = st.text_input(
+                    "親の予定時刻 (YYYY-MM-DD HH:MM)",
+                    value=service.normalize_scheduled_at(r.get("scheduled_at", "")),
+                    key=f"sched_{qid}",
+                )
+                item["scheduled_at"] = sched
+            items.append(item)
+        c1, c2 = st.columns(2)
+        if c1.button("✅ ツリーを承認", key=f"apth_{tid}", use_container_width=True):
+            _run_write("ツリー承認", service.save_rows, sheets, items, True)
+        if c2.button("💾 まとめて下書き保存", key=f"svth_{tid}", use_container_width=True):
+            _run_write("下書き保存", service.save_rows, sheets, items, False)
+
+
 def _tab_review(sheets) -> None:
     try:
-        drafts = service.read_drafts(sheets)
+        groups = service.read_draft_groups(sheets)
     except Exception as exc:
-        logger.exception("read_drafts failed")
+        logger.exception("read_draft_groups failed")
         st.error(f"候補の取得に失敗: {exc}")
         return
 
-    st.markdown(f"### 候補レビュー（draft: {len(drafts)}）")
-    if not drafts:
+    total = sum(len(g["rows"]) for g in groups)
+    st.markdown(f"### 候補レビュー（draft: {total} / グループ: {len(groups)}）")
+    if not groups:
         st.info("レビュー待ちの下書きはありません。")
         return
 
-    # Lay cards out across N columns on wide screens; Streamlit stacks them
+    # Lay groups across N columns on wide screens; Streamlit stacks them
     # vertically on narrow/mobile screens automatically.
     cols = st.columns(_REVIEW_COLUMNS, gap="large")
-    for i, d in enumerate(drafts):
+    for i, g in enumerate(groups):
         with cols[i % _REVIEW_COLUMNS]:
-            _draft_card(sheets, d)
+            if g["is_thread"]:
+                _thread_card(sheets, g)
+            else:
+                _draft_card(sheets, g["rows"][0])
             st.write("")  # vertical breathing room between stacked cards
 
 
@@ -245,6 +277,67 @@ def _tab_notes(sheets) -> None:
             _run_write("小言を追加", service.add_note, sheets, note, service.today_jst())
 
 
+def _tab_references(sheets) -> None:
+    st.subheader("参考投稿（型・構成を学ぶ swipe file）")
+    st.caption(
+        "伸びてる投稿を貯めて、型・フック・ツリーの“組み立て”だけを学びます。"
+        "本文は丸写しせず、中身はうに自身でオリジナル生成します。"
+    )
+
+    with st.form("add_reference", clear_on_submit=True):
+        st.markdown("**参考投稿を追加**")
+        source = st.text_input("source（URL / ハンドル）")
+        text = st.text_area(
+            "参考本文（構造分析用。ツリーなら各投稿を改行で）", height=140
+        )
+        structure_note = st.text_area(
+            "structure_note（フック / 型 / ツリーの組み立てメモ）", height=100
+        )
+        c1, c2 = st.columns(2)
+        is_thread = c1.checkbox("ツリー（連投）の例")
+        active = c2.checkbox("active（学習対象にする）", value=True)
+        if st.form_submit_button("➕ 追加", use_container_width=True):
+            try:
+                service.add_reference(
+                    sheets, source, text, structure_note,
+                    is_thread, active, service.today_jst(),
+                )
+            except Exception as exc:
+                logger.exception("add_reference failed")
+                st.error(f"追加に失敗しました: {exc}")
+            else:
+                st.success("追加しました")
+                st.rerun()
+
+    st.divider()
+    st.markdown("**登録済みの参考投稿**")
+    try:
+        refs = service.list_references(sheets)
+    except Exception as exc:
+        logger.exception("list_references failed")
+        st.error(f"一覧の取得に失敗: {exc}")
+        return
+    if not refs:
+        st.info("まだ参考投稿がありません。")
+        return
+
+    for r in refs:
+        ridx = r["row_index"]
+        is_active = str(r.get("active", "")).strip().lower() in {"true", "yes", "1", "on", "active"}
+        kind = "🧵ツリー" if str(r.get("is_thread", "")).strip().lower() in {"true", "yes", "1"} else "単発"
+        with st.container(border=True):
+            st.caption(f"{r.get('source', '') or '(no source)'} ／ {kind} ／ {'🟢active' if is_active else '⚪︎off'}")
+            note = str(r.get("structure_note", "") or r.get("learn", "")).strip()
+            if note:
+                st.write(f"**構成**: {note}")
+            body = str(r.get("text", "")).replace("\n", " ")[:120]
+            if body:
+                st.caption(f"参考本文: {body}")
+            label = "⚪︎ off にする" if is_active else "🟢 active にする"
+            if st.button(label, key=f"refactive_{ridx}", use_container_width=True):
+                _run_write("更新", service.set_reference_active, sheets, ridx, not is_active)
+
+
 def main() -> None:
     _require_password()
     sheets = _get_sheets()
@@ -252,11 +345,15 @@ def main() -> None:
     st.title("🧵 Threads 運用ダッシュボード")
     _sidebar(sheets)
 
-    review, schedule, notes = st.tabs(["📝 候補レビュー", "📅 予定・実績", "🗒 小言"])
+    review, schedule, refs, notes = st.tabs(
+        ["📝 候補レビュー", "📅 予定・実績", "📚 参考投稿", "🗒 小言"]
+    )
     with review:
         _tab_review(sheets)
     with schedule:
         _tab_schedule(sheets)
+    with refs:
+        _tab_references(sheets)
     with notes:
         _tab_notes(sheets)
 

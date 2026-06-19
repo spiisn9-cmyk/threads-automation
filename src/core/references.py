@@ -33,11 +33,17 @@ REFERENCES_HEADER = [
 REF_ACTIVE = "active"
 REF_OFF = "off"
 
-_TRUE_VALUES = {"true", "yes", "y", "1", "thread", "tree", "ツリー", "連投"}
+_TRUE_VALUES = {"true", "yes", "y", "1", "thread", "tree", "ツリー", "連投", "on"}
+# `active` accepts booleans (TRUE/FALSE) and the legacy "active" string.
+_ACTIVE_VALUES = {"true", "yes", "y", "1", "on", "active"}
 
 
 def _as_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in _TRUE_VALUES
+
+
+def _is_active(value: Any) -> bool:
+    return str(value or "").strip().lower() in _ACTIVE_VALUES
 
 
 @dataclass(frozen=True)
@@ -60,7 +66,7 @@ def read_active_references(sheets: _RefsSheet) -> list[Reference]:
     rows = sheets.read_rows(REFERENCES_SHEET, "A1:ZZ")
     out: list[Reference] = []
     for d in rows_to_dicts(rows):
-        if str(d.get("active", "")).strip().lower() != REF_ACTIVE:
+        if not _is_active(d.get("active")):
             continue
         text = str(d.get("text", "")).strip()
         structure_note = str(d.get("structure_note", "")).strip() or str(

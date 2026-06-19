@@ -36,6 +36,10 @@ class FakeSheets:
                 return
         grid.append(ordered)
 
+    def update_row(self, sheet, a1, row):
+        idx = int(a1[1:])
+        self.sheets[sheet][idx - 1] = list(row)
+
     def dicts(self, sheet):
         grid = self.sheets[sheet]
         return [dict(zip(grid[0], r)) for r in grid[1:]]
@@ -240,3 +244,115 @@ def test_merge_upsert_missing_key_raises():
     except ValueError:
         return
     raise AssertionError("unknown queue_id should raise")
+
+
+# --- references CRUD ---
+
+from src.core.references import REFERENCES_HEADER, REFERENCES_SHEET  # noqa: E402
+from src.core.references import read_active_references  # noqa: E402
+
+
+def _refs():
+    return {REFERENCES_SHEET: [list(REFERENCES_HEADER)]}
+
+
+def test_add_reference_appends_with_bool_flags_and_is_readable():
+    sheets = FakeSheets(_refs())
+    service.add_reference(
+        sheets,
+        source="@growth",
+        text="親→返信で深掘り",
+        structure_note="フックで引き→具体例→締めで問いかけ",
+        is_thread=True,
+        active=True,
+        today="2026-06-20",
+    )
+    row = sheets.dicts(REFERENCES_SHEET)[0]
+    assert row["source"] == "@growth"
+    assert row["active"] == "TRUE" and row["is_thread"] == "TRUE"
+    assert row["structure_note"].startswith("フックで引き")
+
+    # round-trips through read_active_references (TRUE counts as active)
+    active = read_active_references(sheets)
+    assert len(active) == 1 and active[0].is_thread is True
+
+
+def test_add_reference_rejects_empty():
+    sheets = FakeSheets(_refs())
+    try:
+        service.add_reference(sheets, "", "", "", False, True, "2026-06-20")
+    except ValueError:
+        return
+    raise AssertionError("empty reference should raise")
+
+
+def test_set_reference_active_toggles_off_and_preserves_row():
+    sheets = FakeSheets(_refs())
+    service.add_reference(sheets, "@x", "本文", "メモ", False, True, "2026-06-20")
+    refs = service.list_references(sheets)
+    assert refs[0]["row_index"] == 2
+
+    service.set_reference_active(sheets, refs[0]["row_index"], active=False)
+    row = sheets.dicts(REFERENCES_SHEET)[0]
+    assert row["active"] == "FALSE"
+    assert row["source"] == "@x" and row["text"] == "本文"  # preserved
+    # now excluded from active set
+    assert read_active_references(sheets) == []
+
+
+# --- thread-grouped draft review + bulk approve ---
+
+def _qrow_full(**kw):
+    base = {c: "" for c in POST_QUEUE_HEADER}
+    base.update(kw)
+    return [base[c] for c in POST_QUEUE_HEADER]
+
+
+def test_read_draft_groups_groups_thread_and_singles():
+    sheets = FakeSheets(
+        {
+            POST_QUEUE_SHEET: [list(POST_QUEUE_HEADER)]
+            + [
+                _qrow_full(queue_id="s", status=STATUS_DRAFT, text="単発",
+                           scheduled_at="2026-06-21 09:00"),
+                _qrow_full(queue_id="p", thread_id="T", seq=0, status=STATUS_DRAFT,
+                           text="親", scheduled_at="2026-06-21 10:00"),
+                _qrow_full(queue_id="r1", thread_id="T", seq=1, status=STATUS_DRAFT,
+                           text="返信1", scheduled_at="2026-06-21 10:01"),
+            ]
+        }
+    )
+    groups = service.read_draft_groups(sheets)
+    assert len(groups) == 2
+    single = next(g for g in groups if not g["is_thread"])
+    thread = next(g for g in groups if g["is_thread"])
+    assert single["rows"][0]["queue_id"] == "s"
+    assert thread["thread_id"] == "T"
+    assert [r["queue_id"] for r in thread["rows"]] == ["p", "r1"]  # seq order
+
+
+def test_save_rows_bulk_approves_thread():
+    sheets = FakeSheets(
+        {
+            POST_QUEUE_SHEET: [list(POST_QUEUE_HEADER)]
+            + [
+                _qrow_full(queue_id="p", thread_id="T", seq=0, status=STATUS_DRAFT,
+                           text="親", scheduled_at="2026-06-21T10:00:00+0900"),
+                _qrow_full(queue_id="r1", thread_id="T", seq=1, status=STATUS_DRAFT,
+                           text="返信1", scheduled_at="2026-06-21T10:01:00+0900"),
+            ]
+        }
+    )
+    service.save_rows(
+        sheets,
+        [
+            {"queue_id": "p", "text": "親(編集)", "scheduled_at": "2026-06-22 07:30"},
+            {"queue_id": "r1", "text": "返信1(編集)"},
+        ],
+        approve=True,
+    )
+    by = {d["queue_id"]: d for d in sheets.dicts(POST_QUEUE_SHEET)}
+    assert by["p"]["status"] == STATUS_APPROVED and by["r1"]["status"] == STATUS_APPROVED
+    assert by["p"]["text"] == "親(編集)" and by["r1"]["text"] == "返信1(編集)"
+    assert by["p"]["scheduled_at"] == "2026-06-22 07:30"  # normalized
+    assert by["p"]["thread_id"] == "T" and by["r1"]["seq"] == 1  # preserved
