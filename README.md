@@ -325,6 +325,10 @@ GOOGLE_SA_JSON = '''{"type":"service_account","project_id":"...","private_key":"
 
 > 必要な secrets は **`GOOGLE_SA_JSON` / `SPREADSHEET_ID` / `DASHBOARD_PASSWORD`** の3つだけです。
 
+> **`AttributeError: module 'dashboard.service' has no attribute ...` が出たら**
+> 多くは**古いコードのまま動いている**ケースです。最新を push し、Streamlit Cloud で **Manage app → Reboot**（必要なら **Clear cache**）してください。
+> リポジトリ側の整合は `tests/test_dashboard_app_contract.py` が保証します（`app.py` が呼ぶ `service.*` が全て存在することを検査）。`pytest` で常時チェックされます。
+
 ## 🧩 参考投稿で「構成」を学ぶ → オリジナル生成／ツリー(連投)
 
 ### 参考投稿（references）で型・構成を学ぶ
