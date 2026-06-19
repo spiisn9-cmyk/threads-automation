@@ -1,8 +1,31 @@
-httpx>=0.27,<1.0
-anthropic>=0.40,<1.0
-google-api-python-client>=2.100,<3.0
-google-auth>=2.30,<3.0
-tenacity>=8.2,<10.0
-python-dotenv>=1.0,<2.0
-streamlit>=1.30,<2.0
-pytest>=8.0,<9.0
+# Pinned for STABLE native ABI on Python 3.12 (Streamlit Community Cloud).
+#
+# Goal: avoid the native crash "free(): corrupted unsorted chunks", which is
+# caused by ABI mismatches among numpy / pyarrow / protobuf (all pulled in
+# transitively by Streamlit). The fix is to lock these to a mature, mutually
+# tested set and keep numpy on the battle-tested 1.26 line.
+#
+# Change these together, not individually — mixing a numpy 2.x with wheels
+# built against numpy 1.x (or vice-versa) is exactly what triggers the crash.
+
+# --- App / API clients ---
+httpx==0.27.2
+anthropic==0.40.0
+google-api-python-client==2.149.0
+google-auth==2.35.0
+tenacity==8.5.0
+python-dotenv==1.0.1
+
+# --- Dashboard ---
+streamlit==1.39.0
+
+# --- Native-extension deps (the actual crash fix) ---
+# Pinned explicitly even though they are transitive deps of Streamlit, so pip
+# can't silently resolve them to an incompatible (e.g. numpy 2.x) combination.
+numpy==1.26.4        # < 2.x: most stable on py3.12, satisfies the < 2.3 cap
+pandas==2.2.3        # < 3; supports numpy 1.26
+pyarrow==17.0.0      # stable; ABI-compatible with numpy 1.26
+protobuf==4.25.5     # 4.25 LTS line; < 6 (also < 5 for widest compatibility)
+
+# --- Tests (dev; harmless on Cloud) ---
+pytest==8.3.4
