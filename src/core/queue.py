@@ -23,6 +23,8 @@ POST_QUEUE_HEADER = [
     "tags",  # technique tags, " | "-joined (human feedback)
     "rating",  # good / ok / bad (human feedback)
     "feedback",  # free-text note (human feedback)
+    "thread_id",  # groups a thread (連投); empty = standalone single post
+    "seq",  # position in the thread: 0 = parent, 1.. = replies in order
 ]
 
 # status values

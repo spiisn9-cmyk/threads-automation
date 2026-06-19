@@ -38,6 +38,8 @@ from config.settings import (
     POST_WINDOW_START_HOUR,
     PUBLISH_STATUS_MAX_CHECKS,
     PUBLISH_STATUS_POLL_SECONDS,
+    PUBLISH_THREAD_REPLIES_INLINE,
+    THREAD_REPLY_DELAY_SECONDS,
     load_settings,
 )
 from src.core.queue import (
@@ -69,11 +71,49 @@ class SheetsLike(Protocol):
 
 
 class ThreadsLike(Protocol):
-    def create_post(self, text: str) -> str: ...
+    def create_post(self, text: str, reply_to_id: Optional[str] = None) -> str: ...
 
     def get_container_status(self, creation_id: str) -> dict[str, str]: ...
 
     def publish_post(self, creation_id: str) -> str: ...
+
+
+def _seq_of(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("seq") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def reply_target(
+    all_rows: list[dict[str, Any]], row: dict[str, Any]
+) -> tuple[Optional[str], bool]:
+    """Resolve a row's reply target within its thread.
+
+    Returns (reply_to_id, deferred):
+      - standalone / parent (no thread_id or seq==0) -> (None, False)
+      - reply whose immediate predecessor (seq-1) is posted -> (media_id, False)
+      - reply whose predecessor is not posted yet -> (None, True)  [defer]
+    """
+    thread_id = str(row.get("thread_id", "")).strip()
+    seq = _seq_of(row)
+    if not thread_id or seq <= 0:
+        return None, False
+    prev = next(
+        (
+            r for r in all_rows
+            if str(r.get("thread_id", "")).strip() == thread_id and _seq_of(r) == seq - 1
+        ),
+        None,
+    )
+    if prev is None:
+        return None, True
+    if str(prev.get("status", "")).strip() != STATUS_POSTED:
+        return None, True
+    media_id = str(prev.get("posted_post_id", "")).strip()
+    if not media_id:
+        return None, True
+    return media_id, False
 
 
 # Container statuses that mean "stop waiting".
@@ -167,6 +207,56 @@ def _last_posted_at(rows: list[dict[str, Any]]) -> Optional[datetime]:
     return max(times) if times else None
 
 
+def publish_thread(
+    threads: ThreadsLike,
+    texts: list[str],
+    *,
+    sleep_fn: Callable[[float], None],
+    wait_fn: Callable[[str], None],
+    delay_seconds: float,
+    on_published: Optional[Callable[[int, str], None]] = None,
+) -> list[str]:
+    """Publish a parent + replies as one chain; return media_ids in order.
+
+    Each post replies to the previous one's media_id (texts[0] is the parent).
+    `wait_fn(creation_id)` must block until the container is FINISHED (or raise).
+    `on_published(idx, media_id)` is invoked right after each successful publish
+    (used to mark the sheet row), so a mid-chain failure leaves already-posted
+    parts recorded and recoverable.
+    """
+    media_ids: list[str] = []
+    reply_to: Optional[str] = None
+    for idx, text in enumerate(texts):
+        creation_id = threads.create_post(text, reply_to_id=reply_to)
+        wait_fn(creation_id)
+        media_id = threads.publish_post(creation_id)
+        media_ids.append(media_id)
+        if on_published is not None:
+            on_published(idx, media_id)
+        reply_to = media_id
+        if delay_seconds and idx < len(texts) - 1:
+            sleep_fn(delay_seconds)
+    return media_ids
+
+
+def _approved_thread_chain(
+    all_rows: list[dict[str, Any]], thread_id: str
+) -> list[dict[str, Any]]:
+    """Contiguous approved rows of a thread starting at the parent (seq 0)."""
+    in_thread = sorted(
+        (r for r in all_rows if str(r.get("thread_id", "")).strip() == thread_id),
+        key=_seq_of,
+    )
+    chain: list[dict[str, Any]] = []
+    for expected_seq, r in enumerate(in_thread):
+        if _seq_of(r) != expected_seq:
+            break  # gap in the thread; stop the contiguous chain
+        if str(r.get("status", "")).strip() != STATUS_APPROVED:
+            break  # only publish the approved prefix
+        chain.append(r)
+    return chain
+
+
 def _update_status(
     sheets: SheetsLike,
     row: dict[str, Any],
@@ -203,6 +293,8 @@ def publish_due(
     window_end: int = POST_WINDOW_END_HOUR,
     poll_seconds: float = PUBLISH_STATUS_POLL_SECONDS,
     max_status_checks: int = PUBLISH_STATUS_MAX_CHECKS,
+    thread_inline: bool = PUBLISH_THREAD_REPLIES_INLINE,
+    reply_delay_seconds: float = THREAD_REPLY_DELAY_SECONDS,
 ) -> dict[str, int]:
     """Apply safety guards and publish at most `max_per_run` due posts.
 
@@ -246,11 +338,13 @@ def publish_due(
             )
             return base
 
-    # Guard 4: per-run cap — publish only the earliest due row(s).
-    targets = due[:max_per_run]
-    if not targets:
+    # Guard 4: per-run cap. Walk due rows in order, publishing up to max_per_run;
+    # thread replies whose predecessor isn't posted yet are deferred (skipped).
+    if not due:
         logger.info("No due posts to publish")
         return base
+
+    posted_at_iso = now_jst.strftime("%Y-%m-%dT%H:%M:%S%z")
 
     def mark_failed(row: dict[str, Any], queue_id: str) -> None:
         # Best-effort terminal mark; never raises (avoids masking the real error).
@@ -259,66 +353,100 @@ def publish_due(
         except Exception as upd_exc:
             logger.error("Could not mark queue_id=%s failed: %r", queue_id, upd_exc)
 
-    posted = 0
-    failed = 0
-    for row in targets:
-        queue_id = str(row.get("queue_id"))
-        text = str(row.get("text", ""))
+    def wait_fn(creation_id: str) -> None:
+        wait_until_finished(
+            threads, creation_id, sleep_fn=sleep_fn,
+            poll_seconds=poll_seconds, max_checks=max_status_checks,
+        )
 
-        # Guard 5: short human-like jitter right before posting.
+    def jitter() -> None:
         delay = max(0.0, float(jitter_fn()))
         if delay:
-            logger.info("Jitter: sleeping %.0fs before publishing %s", delay, queue_id)
+            logger.info("Jitter: sleeping %.0fs before publishing", delay)
             sleep_fn(delay)
 
-        # Step 1: create container, WAIT until FINISHED, then publish. If any
-        # of these fails, nothing went out — safe to mark failed.
+    def publish_one(row: dict[str, Any], reply_to: Optional[str]) -> str:
+        """Publish a single row; return 'posted' | 'failed'. Updates row in place."""
+        queue_id = str(row.get("queue_id"))
+        text = str(row.get("text", ""))
         try:
-            creation_id = threads.create_post(text)
-            wait_until_finished(
-                threads,
-                creation_id,
-                sleep_fn=sleep_fn,
-                poll_seconds=poll_seconds,
-                max_checks=max_status_checks,
-            )
+            creation_id = threads.create_post(text, reply_to_id=reply_to)
+            wait_fn(creation_id)
             media_id = threads.publish_post(creation_id)
         except Exception as exc:
             logger.error("Publish failed for queue_id=%s: %r", queue_id, exc, exc_info=True)
             mark_failed(row, queue_id)
             if log_fn is not None:
                 log_fn("failed", 1, f"queue_id={queue_id}: 投稿失敗: {type(exc).__name__}: {exc}")
-            failed += 1
-            continue
-
-        # Step 2: record success. The Sheets client retries+reconnects, so a
-        # post-sleep stale connection no longer breaks this. If it STILL fails,
-        # the post WAS published — mark it terminal (failed) so it is never
-        # re-posted (double-post / ban risk), and log loudly with the media_id
-        # and underlying cause so it can be reconciled by hand.
-        posted_at = now_jst.strftime("%Y-%m-%dT%H:%M:%S%z")
+            return "failed"
         try:
-            _update_status(
-                sheets, row, STATUS_POSTED, posted_post_id=media_id, posted_at=posted_at
-            )
-            posted += 1
+            _update_status(sheets, row, STATUS_POSTED, posted_post_id=media_id, posted_at=posted_at_iso)
+            row["status"] = STATUS_POSTED  # reflect for same-run reply chaining
+            row["posted_post_id"] = media_id
+            row["posted_at"] = posted_at_iso
             logger.info("Published queue_id=%s -> media_id=%s", queue_id, media_id)
+            return "posted"
         except Exception as exc:
             logger.error(
                 "Published queue_id=%s (media_id=%s) but FAILED to record status: %r",
-                queue_id,
-                media_id,
-                exc,
-                exc_info=True,
+                queue_id, media_id, exc, exc_info=True,
             )
             mark_failed(row, queue_id)
             if log_fn is not None:
                 log_fn(
-                    "failed",
-                    1,
+                    "failed", 1,
                     f"queue_id={queue_id}: 投稿成功・記録失敗（二重投稿防止でfailed扱い） "
                     f"media_id={media_id}: {type(exc).__name__}: {exc}",
                 )
+            return "failed"
+
+    posted = 0
+    failed = 0
+    for row in due:
+        if posted >= max_per_run:
+            break
+        queue_id = str(row.get("queue_id"))
+        thread_id = str(row.get("thread_id", "")).strip()
+
+        reply_to, deferred = reply_target(rows, row)
+        if deferred:
+            logger.info("Deferring reply queue_id=%s (predecessor not posted yet)", queue_id)
+            if log_fn is not None:
+                log_fn("skipped", 0, f"queue_id={queue_id}: 前の投稿が未投稿のためツリー返信を保留")
+            continue
+
+        # Inline thread mode: a due thread-parent publishes its whole approved
+        # chain in one run with a short inter-reply delay.
+        if thread_inline and thread_id and _seq_of(row) == 0:
+            chain = _approved_thread_chain(rows, thread_id)
+            jitter()
+
+            def on_published(idx: int, media_id: str, _chain=chain) -> None:
+                r = _chain[idx]
+                _update_status(sheets, r, STATUS_POSTED, posted_post_id=media_id, posted_at=posted_at_iso)
+                r["status"] = STATUS_POSTED
+                r["posted_post_id"] = media_id
+
+            try:
+                media_ids = publish_thread(
+                    threads, [str(r.get("text", "")) for r in chain],
+                    sleep_fn=sleep_fn, wait_fn=wait_fn,
+                    delay_seconds=reply_delay_seconds, on_published=on_published,
+                )
+                posted += len(media_ids)
+                logger.info("Published thread %s (%d posts)", thread_id, len(media_ids))
+            except Exception as exc:
+                logger.error("Thread %s publish interrupted: %r", thread_id, exc, exc_info=True)
+                if log_fn is not None:
+                    log_fn("failed", 1, f"thread={thread_id}: ツリー投稿が中断: {type(exc).__name__}: {exc}")
+                failed += 1
+            break  # one thread per run
+
+        jitter()
+        outcome = publish_one(row, reply_to)
+        if outcome == "posted":
+            posted += 1
+        else:
             failed += 1
 
     return {"due": len(due), "posted": posted, "failed": failed}

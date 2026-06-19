@@ -115,13 +115,14 @@ pytest
 | `posts` | post_id, posted_at, text, views, likes, rating, feedback, tags |
 | `logs` | datetime, job, status, count, message |
 | `learnings` | created_at, learning, evidence, source |
-| `post_queue` | queue_id, scheduled_at, text, theme, status, posted_post_id, posted_at, tags, rating, feedback |
+| `post_queue` | queue_id, scheduled_at, text, theme, status, posted_post_id, posted_at, tags, rating, feedback, thread_id, seq |
 | `notes` | created_at, note, theme, status |
-| `references` | created_at, source, impressions, text, learn, active |
+| `references` | created_at, source, impressions, text, learn, active, structure_note, is_thread |
 
 `post_queue.status` は `draft` → `approved` → `posted` / `failed` の4状態です。
 `notes.status` は `new`（未使用）→ `used`（下書きに反映済み）の2状態です。
-`references.active` は `active`（学習対象）/ `off`（無視）の2値です。
+`references.active` は `active`（学習対象）/ `off`（無視）の2値です。`is_thread` が真（true/yes/1/ツリー等）なら連投の型として学びます。
+`post_queue.thread_id`/`seq` はツリー（連投）用：同じ `thread_id` でグループ、`seq`=0 が親・1.. が返信。空なら単発投稿です。
 `posts.rating` は `good`/`ok`/`bad`（うに手入力）、`feedback` は一言メモ。`learnings.source` は `auto`（分析が追記）/ `uni`（うにが追記）。
 
 ## Phase 2: 投稿の下書き生成＋承認制の予約自動投稿
@@ -323,6 +324,31 @@ GOOGLE_SA_JSON = '''{"type":"service_account","project_id":"...","private_key":"
 
 > 必要な secrets は **`GOOGLE_SA_JSON` / `SPREADSHEET_ID` / `DASHBOARD_PASSWORD`** の3つだけです。
 
+## 🧩 参考投稿で「構成」を学ぶ → オリジナル生成／ツリー(連投)
+
+### 参考投稿（references）で型・構成を学ぶ
+伸びている投稿を `references` に貼り、**型・フック・ツリーの組み立て**だけを学んでオリジナルを作ります。
+
+- `source`: URL / ハンドル
+- `structure_note`: 型・フック・（ツリーなら）親→返信の組み立てメモ（一番大事）
+- `text`: 参考本文（**構造分析のためだけ**。生成では丸写ししない）
+- `is_thread`: 連投の例なら `true`
+- `active`: `active` で学習対象
+
+generate_drafts は active な references の `structure_note`/`text` から**構成だけ**を学び、中身はうに自身（小言／5つの柱／技法タグ）でオリジナルに書きます。
+**本文・トピック・固有表現の丸写しは禁止**（プロンプトに明示）。`is_thread` の参考があると、候補の一部をツリー型にする指示が入ります。
+
+### ツリー（連投）の作り方・投稿
+- **生成**: モデルが候補をツリー型にすると、`post_queue` に親（`seq=0`）＋返信（`seq=1,2…`）が同じ `thread_id` で入ります。
+- **承認**: ダッシュボードで親・返信それぞれを編集／承認（`approved`）。
+- **投稿（既定 = 安全運用）**: `publish_queue` は親を投稿 → 返信は **前の投稿が公開済みになってから** `reply_to_id` で順に繋げて投稿します。
+  - 既定では「1回1本」ガードを守るため、返信は次回以降の実行で順次公開（前のreplyにぶら下げ）。親→返信1→返信2…と正しく連なります。
+  - 前の投稿が未公開の返信は自動で**保留**（`logs` に記録）。
+- **短間隔オプション**: `config/settings.py` の `PUBLISH_THREAD_REPLIES_INLINE=True` にすると、**1スレッドを1回の実行でまとめて連投**（`THREAD_REPLY_DELAY_SECONDS` 間隔）。時間帯・日次上限ガードは維持（スレッドは1実行=1ユニット扱い）。
+  - まずは既定（親のみ自動、返信は順次）での運用を推奨。慣れてきたらインライン連投を検討してください。
+
+> いずれの方式でも、コンテナ `FINISHED` 待ち・接続リトライ・二重投稿防止は維持されます。
+
 ## ⚠️ 要確認（Meta API の不確実性）
 
 実機で確認済みの仕様に合わせていますが、Threads API のレスポンス構造は変わり得ます。
@@ -348,3 +374,5 @@ GOOGLE_SA_JSON = '''{"type":"service_account","project_id":"...","private_key":"
   処理が `ERROR`/`EXPIRED`、または約60秒でも `FINISHED` にならない場合は `failed` とし、`error_message`／待機回数を `logs` に残します。
   待ち時間は `config/settings.py` の `PUBLISH_STATUS_POLL_SECONDS` / `PUBLISH_STATUS_MAX_CHECKS` で調整可能。
 - 投稿には `threads_content_publish` 権限のトークンが必須です。権限不足の場合は `failed` として記録されます。
+- **ツリー(連投)** は返信作成時に `reply_to_id`（=直前の投稿の media_id）を付けて `POST /me/threads` します。
+  Meta 側のパラメータ名・仕様変更時は `threads_client.create_post` の `reply_to_id` 渡し方を要確認（`logs` で結果を確認）。

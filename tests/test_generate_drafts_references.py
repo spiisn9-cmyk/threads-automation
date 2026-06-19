@@ -86,3 +86,24 @@ def test_off_only_references_show_no_section():
     _, user_content = claude.calls[0]
     assert "参考資料" not in user_content
     assert "オフのみ" not in user_content
+
+
+def test_thread_reference_adds_tree_candidate_instruction():
+    # full 8-col row: created_at, source, impressions, text, learn, active,
+    # structure_note, is_thread
+    sheets = FakeSheets(
+        [
+            [
+                "2026-06-01", "@thready", "", "親→返信で深掘りする連投例",
+                "", "active", "親フックで引き→返信で具体例→締めで問いかけ", "true",
+            ]
+        ]
+    )
+    claude = FakeClaude(_payload(DAILY_DRAFT_COUNT))
+    generate(sheets, claude, "SYS", NOW)
+    _, uc = claude.calls[0]
+    assert "参考資料" in uc
+    assert "丸写し" in uc  # no-copy instruction present
+    assert "親フックで引き→返信で具体例→締めで問いかけ" in uc  # structure_note surfaced
+    assert "ツリー候補" in uc  # thread-candidate guidance triggered
+    assert "thread" in uc  # tells the model how to emit a thread

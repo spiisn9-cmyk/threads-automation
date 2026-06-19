@@ -48,6 +48,14 @@ POST_JITTER_MINUTES = 3  # random 0..N min delay before posting to scatter timin
 PUBLISH_STATUS_POLL_SECONDS = 3  # interval between status checks
 PUBLISH_STATUS_MAX_CHECKS = 20  # ~60s total before giving up
 
+# Threads (連投) publishing.
+# Default False: post the parent automatically; replies post on later runs once
+# their predecessor is published (manual/cross-run, fully guard-respecting).
+# True: publish the whole approved chain in one run with a short inter-reply
+# delay (a thread = one per-run unit).
+PUBLISH_THREAD_REPLIES_INLINE = False
+THREAD_REPLY_DELAY_SECONDS = 30  # short gap between chained replies (inline mode)
+
 
 class SettingsError(RuntimeError):
     """Raised when a required setting is missing or malformed."""

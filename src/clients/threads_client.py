@@ -212,17 +212,19 @@ class ThreadsClient:
             "error_message": str(raw.get("error_message") or ""),
         }
 
-    def create_post(self, text: str) -> str:
+    def create_post(self, text: str, reply_to_id: str | None = None) -> str:
         """Create a TEXT media container and return its creation id.
 
         POST /me/threads?media_type=TEXT&text=...  ->  {"id": "<creation_id>"}
+        When `reply_to_id` is given, the post is created as a reply to that
+        media id (used to build threads / 連投).
         """
         if not text:
             raise ValueError("text is required to create a post")
-        raw = self._post(
-            f"{self._user_id}/threads",
-            {"media_type": "TEXT", "text": text},
-        )
+        params = {"media_type": "TEXT", "text": text}
+        if reply_to_id:
+            params["reply_to_id"] = reply_to_id
+        raw = self._post(f"{self._user_id}/threads", params)
         creation_id = raw.get("id")
         if not creation_id:
             logger.error("create_post: no id in response: %s", raw)

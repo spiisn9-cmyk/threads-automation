@@ -69,13 +69,15 @@ class FakeSheets:
 class FakeThreads:
     def __init__(self, statuses: list[str] | None = None) -> None:
         self.created: list[str] = []
+        self.reply_targets: list[str | None] = []  # reply_to_id per create_post
         self.published: list[str] = []
         self.status_checks = 0
         # status sequence returned by get_container_status; default: ready now.
         self._statuses = statuses if statuses is not None else ["FINISHED"]
 
-    def create_post(self, text: str) -> str:
+    def create_post(self, text: str, reply_to_id: str | None = None) -> str:
         self.created.append(text)
+        self.reply_targets.append(reply_to_id)
         return f"creation-{len(self.created)}"
 
     def get_container_status(self, creation_id: str) -> dict[str, str]:
@@ -241,7 +243,7 @@ def test_jitter_sleep_runs_before_publish():
 
 def test_failed_post_marked_failed_and_logged():
     class FailingThreads(FakeThreads):
-        def create_post(self, text: str) -> str:
+        def create_post(self, text: str, reply_to_id: str | None = None) -> str:
             raise RuntimeError("boom")
 
     sheets = FakeSheets([_row("q1", STATUS_APPROVED, PAST)])

@@ -236,36 +236,57 @@ def _build_user_content(
     lines.append("")
 
     if references:
-        lines.append("## 参考資料（型のお手本。伸びている投稿の“構成”だけ学ぶ）")
+        has_thread_ref = any(r.is_thread for r in references)
+        lines.append("## 参考資料（型・構成のお手本。“組み立て”だけ学ぶ）")
         lines.append(
-            "下は伸びている投稿の例。型・構成・書き出し・切り口・問いかけ方を学ぶために使う。"
-            "本文・トピック・具体的な表現は丸写ししない（パクリ・重複を避ける）。"
-            "あくまでうに自身の内容（上の小言／5つの柱）を、学んだ型で書くこと。"
+            "下は伸びている投稿の例。型・フック・構成・切り口・問いかけ方"
+            "（ツリーなら親→返信の組み立て）を学ぶために使う。"
+            "⚠️ 本文・トピック・固有表現は絶対に丸写ししない（パクリ・重複を避ける）。"
+            "学ぶのは“構造”だけ。中身はうに自身（上の小言／5つの柱／技法タグ）でオリジナルに書く。"
         )
         for i, ref in enumerate(references, start=1):
-            sample = ref.text.replace("\n", " ")[:120]
-            meta = f"source={ref.source or '不明'}"
-            if ref.impressions:
-                meta += f", impressions≒{ref.impressions}"
-            learn = f" / 学ぶ点: {ref.learn}" if ref.learn else ""
-            lines.append(f"{i}. ({meta}) 例: 「{sample}」{learn}")
+            kind = "ツリー" if ref.is_thread else "単発"
+            meta = f"source={ref.source or '不明'} / {kind}"
+            lines.append(f"{i}. ({meta})")
+            if ref.structure_note:
+                lines.append(f"   - 学ぶ構成: {ref.structure_note}")
+            if ref.text:
+                lines.append(f"   - 参考本文(丸写し禁止): 「{ref.text.replace(chr(10), ' ')[:120]}」")
         lines.append("")
 
+        if has_thread_ref:
+            lines.append(
+                "## ツリー候補について"
+            )
+            lines.append(
+                "参考にツリー(連投)の例がある場合、候補のうち1本程度を"
+                "ツリー型にしてよい。その場合は JSON の要素に "
+                "thread: [\"返信1の本文\", \"返信2の本文\", ...] を付ける"
+                "（text が親、thread が続きの返信）。親→返信が自然に繋がる構成にし、"
+                "やはり参考の文面は丸写ししない。"
+            )
+            lines.append("")
+
     lines.append(
-        f"ちょうど{count}本。各本にtheme（5つの柱のいずれか）を付け、"
+        f"候補はちょうど{count}本。各本にtheme（5つの柱のいずれか）を付け、"
         f"本文は日本語{MAX_DRAFT_CHARS}文字以内。"
         "全部を同じ長さに揃えず、普段は短め中心、1本程度は熱量のある長文を混ぜる。"
     )
     lines.append(
         "改善方針: good・伸びた投稿でよく使われた技法に寄せ、badや一言で指摘された点は補強・回避する。"
         "低反応だった型も避ける。"
-        "ただし小言の事実は創作しない／参考・型は丸写ししない／数値(フォロワー・views)は投稿に出さない。"
+        "ただし小言の事実は創作しない／参考・型・ツリー構成は学ぶが本文は丸写ししない／"
+        "数値(フォロワー・views)は投稿に出さない。"
     )
     return "\n".join(lines)
 
 
-def parse_drafts(raw: str, expected: int) -> list[tuple[str, str]]:
-    """Parse the model's JSON array into (theme, text) tuples, defensively."""
+def parse_drafts(raw: str, expected: int) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Parse the model's JSON array into (theme, text, replies) tuples.
+
+    `replies` is the optional "thread" array (follow-up posts forming a ツリー);
+    empty tuple for a normal single post. Defensive against malformed JSON.
+    """
     text = raw.strip()
     if text.startswith("```"):
         # strip an optional ```json ... ``` fence
@@ -282,7 +303,7 @@ def parse_drafts(raw: str, expected: int) -> list[tuple[str, str]]:
     if not isinstance(data, list):
         raise RuntimeError("Drafts JSON is not a list")
 
-    drafts: list[tuple[str, str]] = []
+    drafts: list[tuple[str, str, tuple[str, ...]]] = []
     for item in data:
         if not isinstance(item, dict):
             continue
@@ -290,7 +311,15 @@ def parse_drafts(raw: str, expected: int) -> list[tuple[str, str]]:
         if not body:
             continue
         theme = str(item.get("theme", "")).strip() or "未分類"
-        drafts.append((theme, body[:MAX_DRAFT_CHARS]))
+        replies_raw = item.get("thread")
+        replies: tuple[str, ...] = ()
+        if isinstance(replies_raw, list):
+            replies = tuple(
+                str(r).strip()[:MAX_DRAFT_CHARS]
+                for r in replies_raw
+                if str(r).strip()
+            )
+        drafts.append((theme, body[:MAX_DRAFT_CHARS], replies))
 
     if not drafts:
         raise RuntimeError("No usable drafts found in Claude response")
@@ -299,49 +328,70 @@ def parse_drafts(raw: str, expected: int) -> list[tuple[str, str]]:
     return drafts
 
 
+def _queue_row(
+    queue_id: str,
+    scheduled_at: str,
+    text: str,
+    theme: str,
+    thread_id: str,
+    seq: int,
+) -> list[Any]:
+    row_dict = {
+        "queue_id": queue_id,
+        "scheduled_at": scheduled_at,
+        "text": text,
+        "theme": theme,
+        "status": STATUS_DRAFT,
+        "posted_post_id": "",
+        "posted_at": "",
+        "tags": "",
+        "rating": "",
+        "feedback": "",
+        "thread_id": thread_id,
+        "seq": seq,
+    }
+    # Default any columns not set here (forward-compatible with new columns).
+    return [row_dict.get(col, "") for col in POST_QUEUE_HEADER]
+
+
 def build_queue_rows(
-    drafts: list[tuple[str, str]],
+    drafts: list[tuple[str, str, tuple[str, ...]]],
     now: datetime,
     count: int,
 ) -> list[list[Any]]:
     """Build post_queue rows (header order) for tomorrow as same-day candidates.
 
-    Daily run: all `count` drafts are candidates for the NEXT day, each at a
-    randomized time within the window [POST_WINDOW_START_HOUR,
-    POST_WINDOW_END_HOUR) (JST) with a random minute, so times are spread out
-    and never land on the same hour:minute. The human approves the ones to post
-    (the publish guard caps how many actually go out per day); the rest can be
-    edited or left. queue_id is unique per run via a timestamp prefix + sequence.
+    Each of the `count` drafts is a candidate for the NEXT day at a randomized
+    time within the publish window (JST). A draft with replies becomes a THREAD:
+    the parent (seq=0) plus one row per reply (seq=1,2,…) sharing a `thread_id`
+    (= the parent's queue_id), with replies scheduled a minute apart so ordering
+    is stable. Single drafts get an empty thread_id and seq=0.
     """
     stamp = now.astimezone(JST).strftime("%Y%m%d%H%M")
     next_day = now.astimezone(JST).date() + timedelta(days=1)
-    # Last hour that still leaves room before the window closes.
     last_hour = max(POST_WINDOW_START_HOUR, POST_WINDOW_END_HOUR - 1)
     rows: list[list[Any]] = []
-    for i, (theme, body) in enumerate(drafts[:count]):
+    for i, (theme, body, replies) in enumerate(drafts[:count]):
         hour = random.randint(POST_WINDOW_START_HOUR, last_hour)
         minute = random.randint(0, 59)
-        scheduled = datetime.combine(
-            next_day,
-            time(hour=hour, minute=minute),
-            tzinfo=JST,
+        base = datetime.combine(next_day, time(hour=hour, minute=minute), tzinfo=JST)
+        parent_id = f"q{stamp}-{i + 1:02d}"
+
+        if not replies:
+            rows.append(
+                _queue_row(parent_id, base.strftime("%Y-%m-%dT%H:%M:%S%z"), body, theme, "", 0)
+            )
+            continue
+
+        # Threaded candidate: parent + replies, shared thread_id = parent_id.
+        rows.append(
+            _queue_row(parent_id, base.strftime("%Y-%m-%dT%H:%M:%S%z"), body, theme, parent_id, 0)
         )
-        scheduled_at = scheduled.strftime("%Y-%m-%dT%H:%M:%S%z")
-        queue_id = f"q{stamp}-{i + 1:02d}"
-        row_dict = {
-            "queue_id": queue_id,
-            "scheduled_at": scheduled_at,
-            "text": body,
-            "theme": theme,
-            "status": STATUS_DRAFT,
-            "posted_post_id": "",
-            "posted_at": "",
-            "tags": "",
-            "rating": "",
-            "feedback": "",
-        }
-        # Default any columns not set here (forward-compatible with new columns).
-        rows.append([row_dict.get(col, "") for col in POST_QUEUE_HEADER])
+        for j, reply in enumerate(replies, start=1):
+            when = (base + timedelta(minutes=j)).strftime("%Y-%m-%dT%H:%M:%S%z")
+            rows.append(
+                _queue_row(f"{parent_id}r{j}", when, reply, theme, parent_id, j)
+            )
     return rows
 
 
