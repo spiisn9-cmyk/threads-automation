@@ -309,6 +309,52 @@ def _tab_schedule(sheets) -> None:
             st.write("")
 
 
+def _tab_learnings(sheets) -> None:
+    st.subheader("学習ルール（学びの蓄積）")
+    st.caption(
+        "フックの型・避けたい表現・気づきなどを書いて追加すると、"
+        "翌日以降の下書き生成で毎回参照されます。"
+    )
+    with st.form("add_learning", clear_on_submit=True):
+        learning = st.text_area(
+            "学び・ルール",
+            height=80,
+            placeholder="例: フックは「逆説」か「共通の悩みへの問い」で始める",
+        )
+        evidence = st.text_input(
+            "根拠・メモ（任意）",
+            placeholder="例: 問いかけ型で始めた投稿がいいね率高かった",
+        )
+        if st.form_submit_button("➕ 追加", use_container_width=True):
+            if not learning.strip():
+                st.warning("学びが空です。")
+            else:
+                try:
+                    service.add_learning(sheets, learning, evidence)
+                except Exception as exc:
+                    logger.exception("add_learning failed")
+                    st.error(f"追加に失敗しました: {exc}")
+                else:
+                    st.success("追加しました")
+                    st.rerun()
+
+    st.divider()
+    st.markdown("**登録済みの学び（新しい順）**")
+    try:
+        items = service.list_learnings(sheets)
+    except Exception as exc:
+        logger.exception("list_learnings failed")
+        st.error(f"一覧の取得に失敗: {exc}")
+        return
+    if not items:
+        st.info("まだ学びが登録されていません。")
+        return
+    for item in items:
+        src_badge = "🙋 uni" if item.source == "uni" else "🤖 auto"
+        ev = f" — {item.evidence}" if item.evidence else ""
+        st.markdown(f"- `{item.created_at[:10]}` {src_badge} **{item.learning}**{ev}")
+
+
 def _tab_notes(sheets) -> None:
     st.subheader("小言メモ（投稿素材）")
     st.caption("思いついたことを書いて追加 → 翌日の下書き生成で最優先の素材になります。")
@@ -388,8 +434,8 @@ def main() -> None:
     st.title("🧵 Threads 運用ダッシュボード")
     _sidebar(sheets)
 
-    review, schedule, refs, notes = st.tabs(
-        ["📝 候補レビュー", "📅 予定・実績", "📚 参考投稿", "🗒 小言"]
+    review, schedule, refs, notes, learnings = st.tabs(
+        ["📝 候補レビュー", "📅 予定・実績", "📚 参考投稿", "🗒 小言", "🧠 学習ルール"]
     )
     with review:
         _tab_review(sheets)
@@ -399,6 +445,8 @@ def main() -> None:
         _tab_references(sheets)
     with notes:
         _tab_notes(sheets)
+    with learnings:
+        _tab_learnings(sheets)
 
 
 main()

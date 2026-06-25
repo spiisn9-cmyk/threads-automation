@@ -12,6 +12,12 @@ import logging
 from datetime import datetime
 from typing import Any, Optional, Protocol
 
+from src.core.learnings import (
+    LEARNINGS_SHEET,
+    SOURCE_UNI,
+    append_learning,
+    read_recent_learnings,
+)
 from src.core.notes import NOTES_SHEET, NOTE_STATUS_NEW
 from src.core.queue import (
     JST,
@@ -299,6 +305,22 @@ def set_reference_active(sheets: SheetsLike, row_index: int, active: bool) -> No
         f"A{row_index}",
         [merged.get(c, "") for c in REFERENCES_HEADER],
     )
+
+
+# --- learnings ---
+
+def add_learning(sheets: SheetsLike, learning: str, evidence: str) -> None:
+    """Append a user-authored learning (source=uni) with current JST timestamp."""
+    text = (learning or "").strip()
+    if not text:
+        raise ValueError("学びが空です")
+    append_learning(sheets, text, (evidence or "").strip(), datetime.now(JST), source=SOURCE_UNI)
+
+
+def list_learnings(sheets: SheetsLike) -> list:
+    """All learnings, newest first."""
+    items = read_recent_learnings(sheets, limit=0)
+    return list(reversed(items))
 
 
 # --- notes ---
