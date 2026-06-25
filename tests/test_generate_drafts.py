@@ -123,3 +123,56 @@ def test_parse_drafts_rejects_non_json():
     except RuntimeError:
         return
     raise AssertionError("expected RuntimeError for non-JSON response")
+
+
+def test_fb_sections_have_meta_guard():
+    """FB/rating/learning sections must include a "do not use as topic" guard."""
+    from src.core.queue import POST_QUEUE_HEADER, POST_QUEUE_SHEET
+    from src.core.learnings import LEARNINGS_HEADER, LEARNINGS_SHEET
+
+    sheets = FakeSheets()
+    # Inject a rated post so the rating FB section appears.
+    sheets.sheets["posts"] = [
+        ["post_id", "posted_at", "text", "views", "likes", "rating", "feedback"],
+        ["p1", "2026-06-09", "伸びた投稿", "500", "30", "good", ""],
+    ]
+    # Inject a learning so the learning section appears.
+    sheets.sheets[LEARNINGS_SHEET] = [
+        list(LEARNINGS_HEADER),
+        ["2026-06-09", "問いかけ型が効く", "good評価", "auto"],
+    ]
+    claude = FakeClaude(_payload(DAILY_DRAFT_COUNT))
+    generate(sheets, claude, "SYS", NOW)
+    _, uc = claude.calls[0]
+    # The guard phrase must appear in both sections.
+    assert "題材として絶対に使わない" in uc
+    assert "書き方・方向性の調整" in uc
+
+
+def test_recent_posts_passed_for_diversity():
+    """Direct recent posts must reach the prompt for anti-repeat steering."""
+    sheets = FakeSheets()
+    claude = FakeClaude(_payload(DAILY_DRAFT_COUNT))
+    generate(sheets, claude, "SYS", NOW)
+    _, uc = claude.calls[0]
+    # Both recent posts appear in the diversity section.
+    assert "伸びた投稿" in uc
+    assert "ふつうの投稿" in uc
+    # The diversity instruction is present.
+    assert "書き出し・テンプレCTA・切り口・構成が" in uc
+
+
+def test_references_buzz_analysis_instruction_in_prompt():
+    """The prompt must ask Claude to analyse winning patterns from references."""
+    sheets = FakeSheets()
+    # Seed a reference so the section appears.
+    from src.core.references import REFERENCES_HEADER, REFERENCES_SHEET
+    sheets.sheets[REFERENCES_SHEET] = [
+        list(REFERENCES_HEADER),
+        ["2026-06-01", "@x", "", "勝ちパターン参考投稿", "", "active", "", "FALSE"],
+    ]
+    claude = FakeClaude(_payload(DAILY_DRAFT_COUNT))
+    generate(sheets, claude, "SYS", NOW)
+    _, uc = claude.calls[0]
+    assert "勝ちパターン" in uc
+    assert "新しい角度" in uc

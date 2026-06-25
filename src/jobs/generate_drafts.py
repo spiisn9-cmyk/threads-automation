@@ -80,6 +80,14 @@ def _top_posts(sheets: SheetsLike, limit: int) -> list[dict[str, Any]]:
     return posts[:limit]
 
 
+def _recent_posts(sheets: SheetsLike, limit: int = 5) -> list[str]:
+    """Return recent post texts (newest first) for diversity / anti-repeat steering."""
+    posts = rows_to_dicts(sheets.read_rows(POSTS_SHEET, "A1:ZZ"))
+    posts = [p for p in posts if str(p.get("text", "")).strip()]
+    posts.sort(key=lambda p: str(p.get("posted_at", "")), reverse=True)
+    return [str(p.get("text", "")).replace("\n", " ")[:80] for p in posts[:limit]]
+
+
 def _rated_posts(sheets: SheetsLike, limit: int = 5) -> tuple[list[str], list[str]]:
     """Return (good_texts, bad_texts) from human ratings on the posts sheet."""
     good: list[str] = []
@@ -131,6 +139,13 @@ def _feedback_signals(sheets: SheetsLike, limit: int = 5) -> dict[str, Any]:
     }
 
 
+_FB_META_GUARD = (
+    "【メタ指示：これは「過去投稿への評価・改善メモ」。"
+    "投稿の本文・題材として絶対に使わない／その文言を投稿に含めない。"
+    "投稿の「書き方・方向性の調整」のためだけに参照する。】"
+)
+
+
 def _build_user_content(
     top_posts: list[dict[str, Any]],
     count: int,
@@ -140,6 +155,7 @@ def _build_user_content(
     good_posts: list[str],
     bad_posts: list[str],
     feedback: dict[str, Any],
+    recent_posts: list[str] | None = None,
 ) -> str:
     lines = [f"以下を参考に、投稿の下書きを{count}本作ってください。", ""]
 
@@ -182,14 +198,14 @@ def _build_user_content(
     lines.append("")
 
     if learnings:
-        lines.append("## これまでの学び（効く型に寄せ、避ける型を避ける）")
+        lines.append(f"## これまでの学び（効く型に寄せ、避ける型を避ける） {_FB_META_GUARD}")
         for ln in learnings:
             ev = f"（根拠: {ln.evidence}）" if ln.evidence else ""
             lines.append(f"- {ln.learning}{ev}")
         lines.append("")
 
     if good_posts or bad_posts:
-        lines.append("## 評価フィードバック（rating）")
+        lines.append(f"## 評価フィードバック（rating） {_FB_META_GUARD}")
         if good_posts:
             lines.append("good評価・伸びた型 → こういう型・切り口に寄せる：")
             for t in good_posts:
@@ -205,7 +221,7 @@ def _build_user_content(
     good_ex = feedback.get("good_examples") or []
     bad_ex = feedback.get("bad_examples") or []
     if good_tags or bad_tags or good_ex or bad_ex:
-        lines.append("## 技法フィードバック（タグ＋一言。学習して反映）")
+        lines.append(f"## 技法フィードバック（タグ＋一言。学習して反映） {_FB_META_GUARD}")
         if good_tags:
             lines.append(
                 "good/伸びた投稿でよく使われた技法 → これらの型に寄せる: "
@@ -237,12 +253,14 @@ def _build_user_content(
 
     if references:
         has_thread_ref = any(r.is_thread for r in references)
-        lines.append("## 参考資料（型・構成のお手本。“組み立て”だけ学ぶ）")
+        lines.append("## 参考資料（勝ちパターンを自分で分析して新しい角度で書く）")
         lines.append(
-            "下は伸びている投稿の例。型・フック・構成・切り口・問いかけ方"
-            "（ツリーなら親→返信の組み立て）を学ぶために使う。"
+            "下は伸びている投稿の例。"
+            "【分析タスク】これら投稿に共通する勝ちパターン（フック・切り口・感情・構成・問いかけ方）を"
+            "自分で分析し、そのパターンをうにのネタ（上の小言／5つの柱）に適用して"
+            "「新しい角度」の投稿を作ること。"
             "⚠️ 本文・トピック・固有表現は絶対に丸写ししない（パクリ・重複を避ける）。"
-            "学ぶのは“構造”だけ。中身はうに自身（上の小言／5つの柱／技法タグ）でオリジナルに書く。"
+            "中身はうに自身でオリジナルに書く。"
         )
         for i, ref in enumerate(references, start=1):
             kind = "ツリー" if ref.is_thread else "単発"
@@ -267,10 +285,25 @@ def _build_user_content(
             )
             lines.append("")
 
+    if recent_posts:
+        lines.append("## 直近の自分の投稿（書き出し・型・切り口が被らないように）")
+        lines.append(
+            "以下は最近のうにの投稿。書き出し・テンプレCTA・切り口・構成が"
+            "これらと被らないように{count}本の角度を散らすこと。".format(count=count)
+        )
+        for rp in recent_posts:
+            lines.append(f"- {rp}")
+        lines.append("")
+
     lines.append(
         f"候補はちょうど{count}本。各本にtheme（5つの柱のいずれか）を付け、"
         f"本文は日本語{MAX_DRAFT_CHARS}文字以内。"
         "全部を同じ長さに揃えず、普段は短め中心、1本程度は熱量のある長文を混ぜる。"
+    )
+    lines.append(
+        f"{count}本それぞれで書き出し・フック・切り口・構成・長さを変える。"
+        "同じ出だし・同じテンプレCTAを繰り返さない。毎回問いかけで締めなくてもよい。"
+        "柱や技法はローテーションさせ偏らせない。"
     )
     lines.append(
         "改善方針: good・伸びた投稿でよく使われた技法に寄せ、badや一言で指摘された点は補強・回避する。"
@@ -411,10 +444,11 @@ def generate(
     learnings = read_recent_learnings(sheets)  # steer toward what works
     good_posts, bad_posts = _rated_posts(sheets)  # lean to good, avoid bad
     feedback = _feedback_signals(sheets)  # technique tags + one-line notes
+    recent_posts = _recent_posts(sheets)  # for diversity / anti-repeat
     # Growth metrics are intentionally not read here — see _build_user_content.
     user_content = _build_user_content(
         top_posts, count, notes_to_use, references, learnings,
-        good_posts, bad_posts, feedback,
+        good_posts, bad_posts, feedback, recent_posts,
     )
 
     raw = claude.generate(system_prompt, user_content)

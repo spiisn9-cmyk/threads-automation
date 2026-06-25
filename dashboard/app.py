@@ -125,58 +125,74 @@ def _sidebar(sheets) -> None:
         st.rerun()
 
 
-def _draft_card(sheets, d) -> None:
+def _draft_detail(sheets, d) -> None:
+    """Full edit/approve UI for a single post (shown inside an expander)."""
     qid = str(d.get("queue_id", ""))
-    with st.container(border=True):
-        st.caption(f"{qid} ／ theme: {d.get('theme', '')}")
-        text = st.text_area("本文", value=d.get("text", ""), height=180, key=f"text_{qid}")
-        sched = st.text_input(
-            "予定時刻 (YYYY-MM-DD HH:MM)",
-            value=service.normalize_scheduled_at(d.get("scheduled_at", "")),
-            key=f"sched_{qid}",
-        )
-        c1, c2 = st.columns(2)
-        if c1.button("✅ 承認", key=f"ap_{qid}", use_container_width=True):
-            _run_write("承認", service.approve_draft, sheets, qid, text, sched)
-        if c2.button("💾 下書き保存", key=f"sv_{qid}", use_container_width=True):
-            _run_write("下書き保存", service.save_draft, sheets, qid, text, sched)
+    text = st.text_area("本文", value=d.get("text", ""), height=180, key=f"text_{qid}")
+    sched = st.text_input(
+        "予定時刻 (YYYY-MM-DD HH:MM)",
+        value=service.normalize_scheduled_at(d.get("scheduled_at", "")),
+        key=f"sched_{qid}",
+    )
+    c1, c2 = st.columns(2)
+    if c1.button("✅ 承認", key=f"ap_{qid}", use_container_width=True):
+        _run_write("承認", service.approve_draft, sheets, qid, text, sched)
+    if c2.button("💾 下書き保存", key=f"sv_{qid}", use_container_width=True):
+        _run_write("下書き保存", service.save_draft, sheets, qid, text, sched)
 
-        # Feedback (technique tags + rating + note), saved independently.
-        tags = st.multiselect(
-            "技法タグ", TECHNIQUE_TAGS, default=parse_tags(d.get("tags", "")), key=f"tags_{qid}"
-        )
-        rating = _rating_radio(d.get("rating", ""), key=f"rate_{qid}")
-        fb = st.text_input("一言FB", value=d.get("feedback", ""), key=f"qfb_{qid}")
-        if st.button("🏷 FB保存（タグ/評価/一言）", key=f"qfbsave_{qid}", use_container_width=True):
-            _run_write("FB保存", service.save_queue_feedback, sheets, qid, tags, rating, fb)
+    tags = st.multiselect(
+        "技法タグ", TECHNIQUE_TAGS, default=parse_tags(d.get("tags", "")), key=f"tags_{qid}"
+    )
+    rating = _rating_radio(d.get("rating", ""), key=f"rate_{qid}")
+    fb = st.text_input("一言FB", value=d.get("feedback", ""), key=f"qfb_{qid}")
+    if st.button("🏷 FB保存（タグ/評価/一言）", key=f"qfbsave_{qid}", use_container_width=True):
+        _run_write("FB保存", service.save_queue_feedback, sheets, qid, tags, rating, fb)
 
 
-def _thread_card(sheets, group) -> None:
-    """A whole thread (parent + replies) shown as one card with bulk approve."""
+def _thread_detail(sheets, group) -> None:
+    """Full edit/approve UI for a thread (shown inside an expander)."""
     rows = group["rows"]
     tid = group["thread_id"]
-    parent = rows[0]
-    with st.container(border=True):
-        st.caption(f"🧵 ツリー {tid} ／ {len(rows)}投稿 ／ theme: {parent.get('theme', '')}")
-        items: list[dict] = []
-        for n, r in enumerate(rows):
-            qid = str(r.get("queue_id", ""))
-            label = "親" if n == 0 else f"返信{n}"
-            text = st.text_area(label, value=r.get("text", ""), height=140, key=f"text_{qid}")
-            item = {"queue_id": qid, "text": text}
-            if n == 0:  # only the parent's scheduled_at drives publishing
-                sched = st.text_input(
-                    "親の予定時刻 (YYYY-MM-DD HH:MM)",
-                    value=service.normalize_scheduled_at(r.get("scheduled_at", "")),
-                    key=f"sched_{qid}",
-                )
-                item["scheduled_at"] = sched
-            items.append(item)
-        c1, c2 = st.columns(2)
-        if c1.button("✅ ツリーを承認", key=f"apth_{tid}", use_container_width=True):
-            _run_write("ツリー承認", service.save_rows, sheets, items, True)
-        if c2.button("💾 まとめて下書き保存", key=f"svth_{tid}", use_container_width=True):
-            _run_write("下書き保存", service.save_rows, sheets, items, False)
+    items: list[dict] = []
+    for n, r in enumerate(rows):
+        qid = str(r.get("queue_id", ""))
+        label = "親" if n == 0 else f"返信{n}"
+        text = st.text_area(label, value=r.get("text", ""), height=140, key=f"text_{qid}")
+        item = {"queue_id": qid, "text": text}
+        if n == 0:
+            sched = st.text_input(
+                "親の予定時刻 (YYYY-MM-DD HH:MM)",
+                value=service.normalize_scheduled_at(r.get("scheduled_at", "")),
+                key=f"sched_{qid}",
+            )
+            item["scheduled_at"] = sched
+        items.append(item)
+    c1, c2 = st.columns(2)
+    if c1.button("✅ ツリーを承認", key=f"apth_{tid}", use_container_width=True):
+        _run_write("ツリー承認", service.save_rows, sheets, items, True)
+    if c2.button("💾 まとめて下書き保存", key=f"svth_{tid}", use_container_width=True):
+        _run_write("下書き保存", service.save_rows, sheets, items, False)
+
+
+def _group_row_label(g: dict) -> str:
+    """Single-line summary for the expander label."""
+    if g["is_thread"]:
+        parent = g["rows"][0]
+        preview = str(parent.get("text", "")).replace("\n", " ")[:50]
+        sched = service.normalize_scheduled_at(parent.get("scheduled_at", ""))
+        theme = parent.get("theme", "")
+        n = len(g["rows"])
+        tags_str = str(parent.get("tags", "")).strip()
+        tag_part = f"  [{tags_str}]" if tags_str else ""
+        return f"🧵 {sched}  {theme}  {preview}… (ツリー/返信{n - 1}件){tag_part}"
+    else:
+        d = g["rows"][0]
+        preview = str(d.get("text", "")).replace("\n", " ")[:60]
+        sched = service.normalize_scheduled_at(d.get("scheduled_at", ""))
+        theme = d.get("theme", "")
+        tags_str = str(d.get("tags", "")).strip()
+        tag_part = f"  [{tags_str}]" if tags_str else ""
+        return f"📝 {sched}  {theme}  {preview}…{tag_part}"
 
 
 def _tab_review(sheets) -> None:
@@ -188,21 +204,48 @@ def _tab_review(sheets) -> None:
         return
 
     total = sum(len(g["rows"]) for g in groups)
-    st.markdown(f"### 候補レビュー（draft: {total} / グループ: {len(groups)}）")
-    if not groups:
-        st.info("レビュー待ちの下書きはありません。")
+
+    # --- filters ---
+    fc1, fc2, fc3 = st.columns([2, 3, 1])
+    with fc1:
+        kind_filter = st.selectbox(
+            "種別", ["すべて", "単発のみ", "ツリーのみ"], key="rv_kind"
+        )
+    with fc2:
+        kw = st.text_input("本文キーワード", key="rv_kw", placeholder="絞り込み…")
+    with fc3:
+        st.metric("合計", f"{total}件 / {len(groups)}グループ")
+
+    kw_lower = kw.strip().lower()
+
+    def _match(g: dict) -> bool:
+        if kind_filter == "単発のみ" and g["is_thread"]:
+            return False
+        if kind_filter == "ツリーのみ" and not g["is_thread"]:
+            return False
+        if kw_lower:
+            combined = " ".join(
+                str(r.get("text", "")).lower() for r in g["rows"]
+            )
+            if kw_lower not in combined:
+                return False
+        return True
+
+    visible = [g for g in groups if _match(g)]
+    if not visible:
+        st.info("該当する下書きがありません。")
         return
 
-    # Lay groups across N columns on wide screens; Streamlit stacks them
-    # vertically on narrow/mobile screens automatically.
-    cols = st.columns(_REVIEW_COLUMNS, gap="large")
-    for i, g in enumerate(groups):
-        with cols[i % _REVIEW_COLUMNS]:
+    st.caption(f"{len(visible)} グループを表示中")
+    st.divider()
+
+    for g in visible:
+        label = _group_row_label(g)
+        with st.expander(label, expanded=False):
             if g["is_thread"]:
-                _thread_card(sheets, g)
+                _thread_detail(sheets, g)
             else:
-                _draft_card(sheets, g["rows"][0])
-            st.write("")  # vertical breathing room between stacked cards
+                _draft_detail(sheets, g["rows"][0])
 
 
 def _tab_schedule(sheets) -> None:
